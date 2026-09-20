@@ -1,4 +1,8 @@
-# astrbot_plugin_tcompanion_core
+# TCompanion Core
+
+<div align="center">
+  <img src="./logo.png" alt="TCompanion Core" width="180">
+</div>
 
 TCompanion 核心基座（Phase 1）：为 AstrBot 提供**冻结契约 v1**、SQLite 持久化与
 简化版 LifeState / 周模板 Schedule。

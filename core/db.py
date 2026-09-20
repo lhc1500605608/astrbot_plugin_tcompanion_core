@@ -1,0 +1,252 @@
+"""SQLite schema definition and idempotent migration runner.
+
+Invariants (see ``docs/CONTRACT.md``):
+* No table stores raw message text. Only derived/aggregate values.
+* ``apply_migrations`` is idempotent: re-running on an up-to-date database
+  performs no writes and leaves ``schema_meta.schema_version`` unchanged.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+#: Current target schema version.
+SCHEMA_VERSION = 3
+
+#: Ordered (version, script) pairs. Scripts run at most once per database.
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (
+        1,
+        """
+        CREATE TABLE IF NOT EXISTS personas (
+            persona_id   TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            meta_json    TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS life_state_daily (
+            persona_id TEXT NOT NULL,
+            day        TEXT NOT NULL,
+            activity   TEXT NOT NULL DEFAULT '',
+            energy     REAL NOT NULL DEFAULT 0,
+            scene      TEXT NOT NULL DEFAULT '',
+            summary    TEXT NOT NULL DEFAULT '',
+            as_of      TEXT NOT NULL,
+            PRIMARY KEY (persona_id, day)
+        );
+
+        CREATE TABLE IF NOT EXISTS life_schedule (
+            schedule_id TEXT PRIMARY KEY,
+            persona_id  TEXT NOT NULL,
+            weekday     INTEGER NOT NULL,
+            start_min   INTEGER NOT NULL,
+            end_min     INTEGER NOT NULL,
+            activity    TEXT NOT NULL,
+            scene       TEXT NOT NULL DEFAULT '',
+            energy      REAL NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_life_schedule_persona_weekday
+            ON life_schedule (persona_id, weekday);
+
+        CREATE TABLE IF NOT EXISTS relationships (
+            umo        TEXT NOT NULL,
+            persona_id TEXT NOT NULL,
+            stage      TEXT NOT NULL DEFAULT 'stranger',
+            closeness  REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (umo, persona_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS affinity_ledger (
+            entry_id   TEXT PRIMARY KEY,
+            umo        TEXT NOT NULL,
+            persona_id TEXT NOT NULL,
+            delta      REAL NOT NULL,
+            reason     TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_affinity_ledger_umo
+            ON affinity_ledger (umo, persona_id);
+
+        CREATE TABLE IF NOT EXISTS interaction_stats (
+            umo           TEXT NOT NULL,
+            persona_id    TEXT NOT NULL,
+            day           TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            last_at       TEXT,
+            PRIMARY KEY (umo, persona_id, day)
+        );
+
+        CREATE TABLE IF NOT EXISTS open_threads (
+            thread_id  TEXT PRIMARY KEY,
+            umo        TEXT NOT NULL,
+            persona_id TEXT NOT NULL,
+            title      TEXT NOT NULL DEFAULT '',
+            status     TEXT NOT NULL DEFAULT 'open',
+            opened_at  TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_open_threads_umo
+            ON open_threads (umo, persona_id, status);
+
+        CREATE TABLE IF NOT EXISTS motivation_log (
+            entry_id   TEXT PRIMARY KEY,
+            persona_id TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            value      REAL NOT NULL DEFAULT 0,
+            reason     TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        """,
+    ),
+    (
+        2,
+        """
+        -- v2: real relationship model keyed by (persona_id, user_id).
+        -- v1's placeholder tables only ever held derived values, so a rebuild
+        -- is safe (no message bodies, no production data at v1 release).
+        DROP TABLE IF EXISTS relationships;
+        CREATE TABLE relationships (
+            persona_id      TEXT NOT NULL,
+            user_id         TEXT NOT NULL,
+            affinity        REAL NOT NULL DEFAULT 0,
+            stage           TEXT NOT NULL DEFAULT '陌生',
+            bond            INTEGER NOT NULL DEFAULT 0,
+            last_active_day TEXT,
+            last_decay_day  TEXT,
+            updated_at      TEXT NOT NULL,
+            PRIMARY KEY (persona_id, user_id)
+        );
+
+        DROP TABLE IF EXISTS affinity_ledger;
+        CREATE TABLE affinity_ledger (
+            persona_id TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            event_id   TEXT NOT NULL,
+            delta      REAL NOT NULL,
+            reason     TEXT NOT NULL DEFAULT '',
+            day        TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (persona_id, user_id, event_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_affinity_ledger_daily
+            ON affinity_ledger (persona_id, user_id, day);
+
+        DROP TABLE IF EXISTS interaction_stats;
+        CREATE TABLE interaction_stats (
+            persona_id           TEXT NOT NULL,
+            user_id              TEXT NOT NULL,
+            message_count        INTEGER NOT NULL DEFAULT 0,
+            proactive_sent       INTEGER NOT NULL DEFAULT 0,
+            proactive_replied    INTEGER NOT NULL DEFAULT 0,
+            unanswered_streak    INTEGER NOT NULL DEFAULT 0,
+            reply_delay_sum      REAL NOT NULL DEFAULT 0,
+            reply_delay_count    INTEGER NOT NULL DEFAULT 0,
+            pending_proactive_at TEXT,
+            last_interaction_at  TEXT,
+            updated_at           TEXT NOT NULL,
+            PRIMARY KEY (persona_id, user_id)
+        );
+        """,
+    ),
+    (
+        3,
+        """
+        -- v3: motivation/open-thread audit columns (T3).
+        -- motivation_log gains a per-user scope, the scored candidate set and
+        -- the decision outcome. Still derived values only: no message bodies.
+        ALTER TABLE motivation_log ADD COLUMN umo TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN candidates_json TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN selected_reason TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE motivation_log ADD COLUMN blocked_reason TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN reason_code TEXT NOT NULL DEFAULT '';
+        ALTER TABLE motivation_log ADD COLUMN receipt_key TEXT;
+        CREATE INDEX IF NOT EXISTS idx_motivation_log_scope
+            ON motivation_log (persona_id, user_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_motivation_log_receipt
+            ON motivation_log (persona_id, user_id, receipt_key);
+
+        -- open_threads stays a short-label table; index scopes label lookups.
+        CREATE INDEX IF NOT EXISTS idx_open_threads_scope
+            ON open_threads (umo, status, updated_at);
+        """,
+    ),
+)
+
+#: All tables that must exist after migration, used by tests/health checks.
+EXPECTED_TABLES: tuple[str, ...] = (
+    "schema_meta",
+    "personas",
+    "life_state_daily",
+    "life_schedule",
+    "relationships",
+    "affinity_ledger",
+    "interaction_stats",
+    "open_threads",
+    "motivation_log",
+)
+
+
+def _ensure_meta_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
+def get_schema_version(conn: sqlite3.Connection) -> int:
+    """Return the recorded schema version (0 when uninitialised)."""
+    _ensure_meta_table(conn)
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (str(version),),
+    )
+
+
+def apply_migrations(conn: sqlite3.Connection, target: int = SCHEMA_VERSION) -> int:
+    """Apply pending migrations up to ``target``. Idempotent.
+
+    Returns the resulting schema version.
+    """
+    current = get_schema_version(conn)
+    for version, script in MIGRATIONS:
+        if current < version <= target:
+            conn.executescript(script)
+            _set_schema_version(conn, version)
+            current = version
+    conn.commit()
+    return current
+
+
+def connect(
+    db_path: str | None = None,
+) -> sqlite3.Connection:
+    """Open a connection with the plugin's standard pragmas, no migration."""
+    conn = sqlite3.connect(db_path or ":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    if db_path:
+        conn.execute("PRAGMA journal_mode = WAL")
+    return conn

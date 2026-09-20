@@ -1,0 +1,23 @@
+[project]
+name = "astrbot-plugin-tcompanion-core"
+version = "1.0.0"
+description = "TCompanion core foundation: frozen contract v1 + SQLite + LifeState/Schedule"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"

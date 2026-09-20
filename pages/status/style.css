@@ -1,0 +1,246 @@
+:root {
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --text: #212529;
+  --text-secondary: #6c757d;
+  --border: #dee2e6;
+  --accent: #0d6efd;
+  --badge-bg: #e9ecef;
+  --badge-text: #495057;
+  --empty: #adb5bd;
+}
+
+[data-theme="dark"] {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --text: #e0e0e0;
+  --text-secondary: #a0a0b0;
+  --border: #2a2a4a;
+  --accent: #4dabf7;
+  --badge-bg: #2a2a4a;
+  --badge-text: #c0c0d0;
+  --empty: #6c757d;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  padding: 1rem;
+}
+
+#app {
+  max-width: 960px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.panel h2 {
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+.content {
+  font-size: 0.9rem;
+}
+
+.empty-msg {
+  color: var(--empty);
+  font-style: italic;
+}
+
+/* Life State cards */
+.ls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.75rem;
+}
+
+.ls-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.ls-card .persona {
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+
+.ls-card .field {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.15rem 0;
+}
+
+.ls-card .field .label {
+  color: var(--text-secondary);
+}
+
+.ls-card .field .value {
+  font-weight: 500;
+}
+
+.ls-card .summary {
+  margin-top: 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.ls-card .energy-bar {
+  height: 6px;
+  background: var(--badge-bg);
+  border-radius: 3px;
+  margin-top: 0.3rem;
+  overflow: hidden;
+}
+
+.ls-card .energy-bar .fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+/* Relationship table */
+.rel-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.rel-table th,
+.rel-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.rel-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.rel-table tr:last-child td {
+  border-bottom: none;
+}
+
+.stage-badge {
+  display: inline-block;
+  background: var(--badge-bg);
+  color: var(--badge-text);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+/* Motivation log table */
+.ml-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.ml-table th,
+.ml-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.ml-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ml-table tr:last-child td {
+  border-bottom: none;
+}
+
+.kind-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.kind-candidate {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.kind-adopted {
+  background: #d1e7dd;
+  color: #0f5132;
+}
+
+.kind-blocked {
+  background: #f8d7da;
+  color: #842029;
+}
+
+[data-theme="dark"] .kind-candidate {
+  background: #3d3200;
+  color: #ffd43b;
+}
+
+[data-theme="dark"] .kind-adopted {
+  background: #0a3622;
+  color: #69db7c;
+}
+
+[data-theme="dark"] .kind-blocked {
+  background: #3d0a0a;
+  color: #ff6b6b;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  body {
+    padding: 0.5rem;
+  }
+
+  .ls-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rel-table,
+  .ml-table {
+    font-size: 0.8rem;
+  }
+
+  .rel-table th,
+  .rel-table td,
+  .ml-table th,
+  .ml-table td {
+    padding: 0.35rem 0.5rem;
+  }
+}

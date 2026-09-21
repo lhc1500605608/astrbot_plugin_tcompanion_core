@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import db as schema
+from .emotion import apply_emotion_affinity_delta, cap_emotion_delta
 from .life_state import WeeklySchedule
 from .motivation import DEFAULT_OPEN_THREAD_LIMIT, sanitize_thread_title
 from .relationship import (
@@ -291,6 +292,18 @@ class Store:
             ).fetchone()
         return float(row["total"] or 0.0)
 
+    def ledger_daily_negative(self, persona_id: str, user_id: str, day: str) -> float:
+        """Sum of |negative deltas| already booked for ``(persona, user, day)``."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(-delta), 0) AS total FROM affinity_ledger
+                WHERE persona_id = ? AND user_id = ? AND day = ? AND delta < 0
+                """,
+                (persona_id, user_id, day),
+            ).fetchone()
+        return float(row["total"] or 0.0)
+
     def list_affinity_ledger(self, persona_id: str, user_id: str, limit: int = 100) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -394,6 +407,142 @@ class Store:
         )
         self.save_relationship_state(state)
         return state
+
+    # -- emotion-event ledger (append-only; dedup: persona+user+key) --------
+    def emotion_event_exists(self, persona_id: str, user_id: str, dedupe_key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM emotion_events "
+                "WHERE persona_id = ? AND user_id = ? AND dedupe_key = ?",
+                (persona_id, user_id, dedupe_key),
+            ).fetchone()
+        return row is not None
+
+    def list_emotion_events(
+        self,
+        persona_id: str,
+        user_id: str,
+        *,
+        since_iso: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return recent emotion events (derived values only, no message text)."""
+        sql = "SELECT * FROM emotion_events WHERE persona_id = ? AND user_id = ?"
+        params: list = [persona_id, user_id]
+        if since_iso:
+            sql += " AND ts >= ?"
+            params.append(since_iso)
+        sql += " ORDER BY ts DESC, dedupe_key DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def apply_emotion_event(
+        self,
+        persona_id: str,
+        user_id: str,
+        *,
+        event_id: str,
+        event_type: str,
+        delta: float,
+        reason: str = "",
+        now: datetime | None = None,
+    ) -> dict:
+        """Record one emotion event (idempotent per ``(persona, user, event_id)``).
+
+        The stored event keeps the canonical per-event delta so the valence
+        model sees the full signal; the affinity ledger receives the *capped*
+        delta (shared daily positive cap, negative cap, affinity floor ``0.0``).
+        Returns ``{"applied", "duplicate", "delta", "event_delta", "state"}``.
+        """
+        moment = now or _utcnow()
+        day = moment.date().isoformat()
+        canonical = cap_emotion_delta(delta)
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO emotion_events
+                    (persona_id, user_id, dedupe_key, ts, event_type, delta, reason, day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persona_id,
+                    user_id,
+                    event_id,
+                    moment.isoformat(),
+                    event_type,
+                    canonical,
+                    reason,
+                    day,
+                ),
+            )
+            if cursor.rowcount == 0:
+                self._conn.commit()
+                return {
+                    "applied": False,
+                    "duplicate": True,
+                    "delta": 0.0,
+                    "event_delta": canonical,
+                    "state": self.get_relationship_state(persona_id, user_id),
+                }
+            current = self.get_relationship_state(persona_id, user_id) or RelationshipState(
+                persona_id=persona_id, user_id=user_id, updated_at=moment.isoformat()
+            )
+            applied = apply_emotion_affinity_delta(
+                canonical,
+                daily_positive_used=self.ledger_daily_positive(persona_id, user_id, day),
+                daily_negative_used=self.ledger_daily_negative(persona_id, user_id, day),
+                affinity=current.affinity,
+            )
+            if applied == 0.0:
+                self._conn.commit()
+                return {
+                    "applied": False,
+                    "duplicate": False,
+                    "delta": 0.0,
+                    "event_delta": canonical,
+                    "state": current,
+                }
+            affinity = clamp_affinity(current.affinity + applied)
+            stage = stage_for(affinity, current.stage)
+            bond = derive_bond(stage, False, current.bond)
+            self._conn.execute(
+                """
+                INSERT INTO affinity_ledger
+                    (persona_id, user_id, event_id, delta, reason, day, created_at, event_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persona_id,
+                    user_id,
+                    event_id,
+                    applied,
+                    reason,
+                    day,
+                    moment.isoformat(),
+                    event_type,
+                ),
+            )
+            state = RelationshipState(
+                persona_id=persona_id,
+                user_id=user_id,
+                affinity=affinity,
+                stage=stage,
+                bond=bond,
+                last_active_day=day,
+                last_decay_day=current.last_decay_day,
+                updated_at=moment.isoformat(),
+            )
+            self._conn.commit()
+        self.save_relationship_state(state)
+        return {
+            "applied": True,
+            "duplicate": False,
+            "delta": applied,
+            "event_delta": canonical,
+            "state": state,
+        }
 
     # -- interaction dynamics ---------------------------------------------
     def get_interaction_dynamics(self, persona_id: str, user_id: str) -> InteractionDynamics:

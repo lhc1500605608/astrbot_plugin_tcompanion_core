@@ -110,16 +110,45 @@ function renderMotivationLog(data) {
   el.innerHTML = html;
 }
 
+function renderEmotionState(data) {
+  const el = document.getElementById("emotion-content");
+  const items = data.items || [];
+  if (items.length === 0) {
+    el.innerHTML = '<p class="empty-msg">No emotion data recorded.</p>';
+    return;
+  }
+  let html = `<table class="emotion-table">
+    <thead><tr>
+      <th>User</th><th>Persona</th><th>Emotion</th><th>Valence</th>
+      <th>Expression</th><th>Last event</th><th>As of</th>
+    </tr></thead><tbody>`;
+  for (const e of items) {
+    html += `<tr>
+      <td>${esc(e.user_id)}</td>
+      <td>${esc(e.persona_id)}</td>
+      <td><span class="stage-badge">${esc(e.state)}</span></td>
+      <td>${Number(e.valence).toFixed(2)}</td>
+      <td><span class="kind-badge kind-candidate">${esc(e.mode)}</span></td>
+      <td>${esc(e.last_event || "—")}</td>
+      <td>${formatDateTime(e.as_of)}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
 async function loadAll() {
   try {
-    const [lifeState, relationships, motivationLog] = await Promise.all([
+    const [lifeState, relationships, motivationLog, emotionState] = await Promise.all([
       bridge.apiGet("life-state"),
       bridge.apiGet("relationships"),
       bridge.apiGet("motivation-log"),
+      bridge.apiGet("emotion-state"),
     ]);
     renderLifeState(lifeState);
     renderRelationships(relationships);
     renderMotivationLog(motivationLog);
+    renderEmotionState(emotionState);
   } catch (err) {
     console.error("Failed to load status data:", err);
     document.getElementById("life-state-content").innerHTML =

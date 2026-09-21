@@ -13,6 +13,14 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 
+from .emotion import (
+    EVENT_TYPES,
+    STATE_CALM,
+    VALENCE_WINDOW_HOURS,
+    emotion_snapshot,
+    event_delta,
+    expression_for,
+)
 from .life_state import WeeklySchedule, generate_life_state
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
@@ -21,14 +29,14 @@ from .motivation import (
     fuse_motivation,
     relationship_mode,
 )
-from .relationship import STAGE_STRANGER, parse_umo
+from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
 from .store import Store
 
 #: Frozen contract version. Bump only with a new ``docs/CONTRACT.md`` revision.
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -113,6 +121,9 @@ class ContractV1:
                 "open_threads": True,
                 "quota": True,
                 "proactive": False,
+                # additive v1.1 keys (Phase 2-A/2-C); the map shape is frozen
+                "emotion": True,
+                "expression": True,
             },
         }
 
@@ -194,7 +205,8 @@ class ContractV1:
         Returns ``api_version`` / ``life_state`` / ``relationship`` /
         ``expression_hints`` / ``motivation`` / ``open_threads`` / ``quota`` /
         ``unanswered_streak`` (plus the v1 echo fields ``umo`` / ``persona_id``
-        / ``degraded``).
+        / ``degraded``). v1.1 adds the optional keys ``emotion_state`` and
+        ``expression``; older clients ignore unknown keys.
         """
         moment = self._clock()
         degraded = False
@@ -216,6 +228,13 @@ class ContractV1:
                     resolved_persona = state.persona_id
             except Exception:
                 degraded = True
+
+        # Per-user ledger scope. A private user with no relationship row never
+        # gets one from a pure-negative event (affinity floor 0.0), while
+        # ``record_emotion_event`` attributes those events to
+        # ``DEFAULT_PERSONA_ID`` via ``_resolve_persona``. Reads must use the
+        # same fallback or the ledger stays invisible (emotion_state lost).
+        scope_persona = resolved_persona or DEFAULT_PERSONA_ID
 
         # life_state (persona-scoped; unavailable without a persona_id)
         life_state: dict | None = None
@@ -251,7 +270,7 @@ class ContractV1:
         if not is_group:
             try:
                 streak = self._store.get_interaction_dynamics(
-                    resolved_persona or "", user_id
+                    scope_persona, user_id
                 ).unanswered_streak
             except Exception:
                 degraded = True
@@ -260,6 +279,48 @@ class ContractV1:
             hints = expression_hints(stage, bond, streak)
         except Exception:
             hints = None
+            degraded = True
+
+        # emotion ledger + expression decision (v1.1)
+        # Private scopes read their own ledger; group scopes never inherit
+        # private emotion and are hard-suppressed to the non-intimate modes.
+        emotion_state: dict | None = None
+        expression: dict | None = None
+        emotion_name = ""
+        try:
+            if is_group:
+                decision = expression_for(stage=stage, bond=False, is_group=True)
+            else:
+                since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
+                rows = self._store.list_emotion_events(
+                    scope_persona, user_id, since_iso=since, limit=200
+                )
+                snapshot = emotion_snapshot(rows, now=moment, unanswered_streak=streak)
+                emotion_name = snapshot["state"]
+                emotion_state = {
+                    "state": snapshot["state"],
+                    "valence": snapshot["valence"],
+                    "last_event": snapshot["last_event"],
+                    "as_of": snapshot["as_of"],
+                }
+                decision = expression_for(
+                    state=snapshot["state"],
+                    valence=snapshot["valence"],
+                    stage=stage,
+                    bond=bond,
+                    energy=float((life_state or {}).get("energy") or 0.0),
+                    unanswered_streak=streak,
+                    is_group=False,
+                )
+            expression = {
+                "mode": decision["mode"],
+                "style_hints": decision["style_hints"],
+                "reason": decision["reason"],
+            }
+        except Exception:
+            emotion_state = None
+            expression = None
+            emotion_name = ""
             degraded = True
 
         # open threads (short labels; group sessions never inherit private ones)
@@ -278,7 +339,6 @@ class ContractV1:
         if not is_group:
             try:
                 day_start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
-                scope_persona = resolved_persona or ""
                 daily_used = self._store.count_proactive_sent(
                     scope_persona, user_id, day_start.isoformat()
                 )
@@ -301,6 +361,7 @@ class ContractV1:
                 scene=(life_state or {}).get("scene", ""),
                 open_threads=tuple(open_threads),
                 allow=bool(quota.get("allow")),
+                emotion_state=emotion_name,
             ).to_dict()
         except Exception:
             motivation = {
@@ -326,6 +387,8 @@ class ContractV1:
             "open_threads": open_threads,
             "quota": quota,
             "unanswered_streak": streak,
+            "emotion_state": emotion_state,
+            "expression": expression,
             "degraded": degraded,
         }
 
@@ -403,7 +466,185 @@ class ContractV1:
             "dynamics": dynamics.to_dict(),
         }
 
+    # -- emotion ledger (v1.1) ---------------------------------------------
+    async def record_emotion_event(
+        self,
+        umo: str,
+        *,
+        event_type: str,
+        reason: str = "",
+        dedupe_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """Record one emotion event for a private scope; idempotent.
+
+        Group scopes are isolated (``isolated=True``, nothing written) and
+        unknown event types are rejected fail-closed. ``dedupe_key`` defaults
+        to ``<day>|<event_type>`` (at most one of each per day); the kanjyou
+        layer supplies ``proactive:<send_ts>`` / ``msg:<message_id>`` keys so
+        the two proactive receipts share one slot and one message settles once.
+
+        Returns ``{applied, duplicate, isolated, event, affinity, stage}``
+        plus ``reason`` / ``degraded`` on the degraded paths.
+        """
+        moment = now or self._clock()
+        base = {
+            "applied": False,
+            "duplicate": False,
+            "isolated": False,
+            "event": None,
+            "affinity": 0.0,
+            "stage": STAGE_UNKNOWN,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "reason": "bad_umo", "degraded": True}
+        if key.is_group:
+            return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        if event_type not in EVENT_TYPES:
+            return {**base, "reason": "unknown_event_type", "degraded": True}
+
+        resolved = self._resolve_persona(key.user_id)
+        receipt_key = dedupe_key or f"{moment.date().isoformat()}|{event_type}"
+        try:
+            result = self._store.apply_emotion_event(
+                resolved,
+                key.user_id,
+                event_id=receipt_key,
+                event_type=event_type,
+                delta=event_delta(event_type),
+                reason=reason or f"emotion:{event_type}",
+                now=moment,
+            )
+        except Exception:
+            return {**base, "reason": "storage_error", "degraded": True}
+
+        state = result.get("state")
+        return {
+            "applied": bool(result.get("applied")),
+            "duplicate": bool(result.get("duplicate")),
+            "isolated": False,
+            "event": {
+                "event_type": event_type,
+                "delta": result.get("event_delta", 0.0),
+                "ts": moment.isoformat(),
+                "day": moment.date().isoformat(),
+                "dedupe_key": receipt_key,
+            },
+            "affinity": float(getattr(state, "affinity", 0.0) or 0.0),
+            "stage": str(getattr(state, "stage", STAGE_UNKNOWN) or STAGE_UNKNOWN),
+            "persona_id": resolved,
+            "degraded": False,
+        }
+
+    async def get_emotion_context(self, umo: str, persona_id: str | None = None) -> dict:
+        """Derived emotion state for ``umo`` (pure read, no writes).
+
+        Deterministic and bounded: valence decays with a 24h half-life over a
+        72h window; the state is picked priority-first (see
+        ``core/emotion.py``). Group scopes and failures return a degraded
+        neutral state and never leak private emotion.
+        """
+        moment = self._clock()
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return self._degraded_emotion_context(moment)
+        if key.is_group:
+            return self._degraded_emotion_context(moment)
+
+        resolved = persona_id or self._resolve_persona(key.user_id)
+        try:
+            since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
+            rows = self._store.list_emotion_events(
+                resolved or "", key.user_id, since_iso=since, limit=200
+            )
+            streak = self._store.get_interaction_dynamics(
+                resolved or "", key.user_id
+            ).unanswered_streak
+            snapshot = emotion_snapshot(rows, now=moment, unanswered_streak=streak)
+        except Exception:
+            return self._degraded_emotion_context(moment)
+        return {**snapshot, "degraded": False}
+
+    async def expression_decision(self, umo: str, persona_id: str | None = None) -> dict:
+        """Seven-tier expression decision for ``umo`` (pure read, no writes).
+
+        Private scopes combine the emotion state, the relationship stage and
+        the current life energy; group scopes are hard-suppressed to
+        ``放松``/``活泼``/``温暖`` with ``warmth <= 0.55``.
+        """
+        moment = self._clock()
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return self._degraded_expression()
+        if key.is_group:
+            return self._expression_payload(expression_for(stage=STAGE_STRANGER, is_group=True))
+
+        resolved = persona_id or self._resolve_persona(key.user_id)
+        try:
+            since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
+            rows = self._store.list_emotion_events(
+                resolved or "", key.user_id, since_iso=since, limit=200
+            )
+            streak = self._store.get_interaction_dynamics(
+                resolved or "", key.user_id
+            ).unanswered_streak
+            snapshot = emotion_snapshot(rows, now=moment, unanswered_streak=streak)
+            rel = await self.get_relationship(umo, resolved)
+            energy = 0.0
+            if resolved:
+                life = await self.get_life_state(resolved)
+                energy = float((life or {}).get("energy") or 0.0)
+        except Exception:
+            return self._degraded_expression()
+        decision = expression_for(
+            state=snapshot["state"],
+            valence=snapshot["valence"],
+            stage=str(rel.get("stage") or STAGE_STRANGER),
+            bond=bool(rel.get("bond")),
+            energy=energy,
+            unanswered_streak=streak,
+            is_group=False,
+        )
+        return self._expression_payload(decision)
+
     # -- internals ---------------------------------------------------------
+    def _resolve_persona(self, user_id: str) -> str:
+        """Resolve the persona owning ``user_id`` (falls back to default)."""
+        try:
+            state = self._store.resolve_relationship_state(user_id)
+            return state.persona_id if state is not None else DEFAULT_PERSONA_ID
+        except Exception:
+            return DEFAULT_PERSONA_ID
+
+    def _expression_payload(self, decision: dict) -> dict:
+        return {
+            "api_version": self.api_version,
+            "mode": decision["mode"],
+            "style_hints": decision["style_hints"],
+            "reason": decision["reason"],
+            "degraded": False,
+        }
+
+    def _degraded_expression(self) -> dict:
+        return {
+            **self._expression_payload(expression_for()),
+            "degraded": True,
+        }
+
+    def _degraded_emotion_context(self, moment: datetime) -> dict:
+        return {
+            "state": STATE_CALM,
+            "valence": 0.0,
+            "recent": [],
+            "last_event": None,
+            "as_of": moment.isoformat(),
+            "degraded": True,
+        }
+
     @staticmethod
     def _degraded_life_state(persona_id: str, moment: datetime) -> dict:
         return {

@@ -1,11 +1,18 @@
-# TCompanion Core — 冻结契约 v1
+# TCompanion Core — 冻结契约 v1（v1.1 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`
-- 插件：`astrbot_plugin_tcompanion_core`
+- 契约版本：`api_version = 1`（**v1.1 为纯向后兼容增量**，见 §11/§12）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.1.0`）
 - 代码入口：`core/contract.py`
+
+> v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `emotion` / `expression`；
+> 2. 新增 `record_emotion_event` / `get_emotion_context` / `expression_decision`；
+> 3. `get_proactive_context` 追加**可选**键 `emotion_state` / `expression`；
+> 4. schema 升级到 `4`（新表 `emotion_events` + `affinity_ledger.event_type`）。
+> `api_version` 恒为 `1`；老客户端忽略未知键即不受影响。
 
 ## 1. 通用约定
 
@@ -34,11 +41,12 @@
 | `plugin` | `str` | 否 | 固定 `astrbot_plugin_tcompanion_core` |
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
-| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `proactive` |
+| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` |
 
-`capabilities` 在 Phase 1 的取值：`life_state/schedule/relationship/motivation/
+`capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
+数组属于破坏性变更，见 §8）。取值：`life_state/schedule/relationship/motivation/
 open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送/调度，
-只提供输入与回执）。
+只提供输入与回执）；v1.1 追加 `emotion=true` / `expression=true`。
 
 ## 3. `get_life_state(persona_id) -> dict | None`
 
@@ -92,7 +100,13 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 | `open_threads` | `str[]` | 否 | 短标签列表；缺省 `[]`；群聊恒 `[]` |
 | `quota` | `dict` | 是 | `{hourly_remaining, daily_remaining, allow}` |
 | `unanswered_streak` | `int` | 是 | 连续未回应的主动消息数；缺省 `0` |
+| `emotion_state` | `dict \| None` | 否（v1.1 新增） | `{state, valence, last_event, as_of}`（§11.3）；群聊恒 `None` |
+| `expression` | `dict \| None` | 否（v1.1 新增） | `{mode, style_hints, reason}`（§12）；群聊为抑制后的安全档 |
 | `degraded` | `bool` | 是 | 存储异常 / `life_state` 缺失或降级时为 `true` |
+
+> `emotion_state` / `expression` 是 v1.1 的**可选追加键**：老客户端（kanjyou
+> v2.5.0）忽略未知键即不碎；情绪只影响 `motivation` 评分（负向降权，**绝不提升**）
+> 与 `expression.style_hints.proactive_bias`，`quota` 结构保持冻结不变。
 
 **逐字段兜底**：每个域独立解析，任一域异常只让该字段退回默认，不阻断其余字段；
 调用方须逐字段 `.get()` 兜底。除 `api_version` 外全部可缺省。
@@ -163,13 +177,24 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 测试注入点：向 `KanjyouGate(contract)` 传入任意实现对象，或子类覆写
 `ContractV1.get_contract_info()`。
 
-## 7. SQLite schema（`schema_version = 3`）
+### 6.1 Star 暴露面（跨插件真机边界）
+
+下游插件（kanjyou `CompanionContextAdapter`）通过
+`context.get_registered_star(name).star_cls` 拿到 **Star 实例**，再
+`getattr(star, "<method>")` 调用。因此契约方法必须同时挂载在 Star 实例
+（`main.py` 的 `TCompanionCore`）上，而不只是私有 `self.contract`：每个方法
+都是指向 `ContractV1` 的薄委托（`main._contract()`）。缺失即真机静默降级
+（fail-closed，TMEAAA-454）。Star 未初始化时委托抛 `RuntimeError`，调用方按
+fail-closed 处理。回归由 `tests/test_star_surface.py` 钉住：断言 Star 的公开
+async 面与 `ContractV1` 完全一致。
+
+## 7. SQLite schema（`schema_version = 4`）
 
 库文件：`get_astrbot_plugin_data_path()/astrbot_plugin_tcompanion_core/tcompanion_core.sqlite3`。
 
 表：`personas` / `life_state_daily` / `life_schedule` / `relationships` /
-`affinity_ledger` / `interaction_stats` / `open_threads` / `motivation_log`
-（另有迁移元表 `schema_meta`）。
+`affinity_ledger` / `interaction_stats` / `open_threads` / `motivation_log` /
+`emotion_events`（另有迁移元表 `schema_meta`）。
 
 v2（T2）将关系三表重构为真实模型，键均为 `(persona_id, user_id)`：
 
@@ -188,9 +213,18 @@ v3（T3）为 `motivation_log` 追加审计列（`ALTER TABLE`，加法式）：
 `(persona_id, user_id, receipt_key)`（回执幂等）。`open_threads` 增加
 `(umo, status, updated_at)` 作用域索引。
 
+v4（v1.1，Phase 2-A）为**纯增量**：新增 `emotion_events` 表（主键
+`(persona_id, user_id, dedupe_key)` + `(persona_id, user_id, ts)` 索引），并为
+`affinity_ledger` 追加 `event_type` 列。列变更带 `PRAGMA table_info` 存在性 guard，
+重复执行不报错；**不改写任何旧行**，旧代码（v1.0.0）仍可读写（不查
+`emotion_events`；`affinity_ledger` 用显式列名插入，新列取默认 `''`），故无需回滚。
+
+- `emotion_events(persona_id, user_id, dedupe_key, ts, event_type, delta, reason,
+  day)` —— 只追加；`delta` 为**逐事件规范值**（`±0.03` 内），不含消息原文。
+
 > v1/v2 表仅存派生值、无消息原文，故重构/追加均安全；迁移仍幂等：
-> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v3；
-> 既有 v2 库会安全升级到 v3。
+> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v4；
+> 既有 v2/v3 库会安全原地升级到 v4。
 
 **隐私不变式**：以上任何表都不含消息原文/正文列。`life_state_daily.summary`
 为模型生成的当日生活摘要，`open_threads.title` 为话题标题，均非消息原文。
@@ -229,8 +263,9 @@ v3（T3）为 `motivation_log` 追加审计列（`ALTER TABLE`，加法式）：
 | --- | --- | --- |
 | 单次事件 Δ 上限 | `+0.03` | `cap_event_delta` |
 | 每 `(persona, user)` 每日正向 Δ 上限 | `+0.10` | `effective_delta` + `ledger_daily_positive` |
+| 每日负向 Δ 上限（v1.1） | `-0.06` | `apply_emotion_affinity_delta` + `ledger_daily_negative` |
 | 去重键 | `(persona_id, user_id, event_id)` | `affinity_ledger` 主键，重复幂等 |
-| 负数事件 | 不扣分（Phase 2 情绪账本） | `cap_event_delta` 返回 `0` |
+| 负数事件（v1.0） | 不扣分 | `cap_event_delta` 返回 `0`（仅 Phase 1 正向路径） |
 | 无互动衰减 | 每日 `-0.005`，只向 `0` 收敛 | `decayed` / `Store.apply_decay` |
 
 - 每次实际入账写 `affinity_ledger(delta, reason, day, created_at)`，可回溯审计。
@@ -290,3 +325,86 @@ v3（T3）为 `motivation_log` 追加审计列（`ALTER TABLE`，加法式）：
 - 面板读取：`Store.list_motivation_log()`（`main.py` 只读 Web API）。
 - 额度统计：`Store.count_proactive_sent()` 数 `kind='proactive_outcome' AND
   adopted=1` 且 `created_at >= since` 的行，驱动 §5.2 的 `quota`。
+
+## 11. 情绪事件账本（v1.1 · Phase 2-A）
+
+实现：`core/emotion.py`（纯逻辑）+ `core/store.py`（`apply_emotion_event` 落库）。
+契约 API 版本仍为 `api_version = 1`（仅 schema 升级到 4，字段/方法为加法式）。
+
+### 11.1 `record_emotion_event(umo, *, event_type, reason="", dedupe_key=None, now=None) -> dict`
+
+零 LLM：事件由 kanjyou 侧按词表/回执状态机判定后上报，core 只落账。
+
+| `event_type` | 含义 | `delta` |
+| --- | --- | --- |
+| `valued_reply` | 主动消息在回复窗口内收到回应 | `+0.03` |
+| `ignored_proactive` | 主动消息在忽略窗口内无回应 | `-0.02` |
+| `gratitude` | 命中感谢词表 | `+0.02` |
+| `misunderstood` | 命中误解/不满词表 | `-0.03` |
+| `sudden_warmth` | 命中关心/温柔词表 | `+0.02` |
+| `cold_shoulder` | 连续敷衍计数达阈值 | `-0.01` |
+
+返回：`{applied, duplicate, isolated, event, affinity, stage, persona_id, degraded}`
+（`event = {event_type, delta, ts, day, dedupe_key}`，无原文）。降级路径附 `reason`
+（`bad_umo` / `group_isolated` / `unknown_event_type` / `storage_error`）。
+
+- **幂等/互斥**：主键 `(persona_id, user_id, dedupe_key)`。两类主动回执
+  （`valued_reply` / `ignored_proactive`）**共用** `proactive:{send_ts}` 键 → 先到者
+  落库，后到者返回 `duplicate=true` 且不改账。单条入站消息也只结算一次
+  （`msg:{message_id}`，缺省 `msg:{umo}:{int(ts)}`）；缺省键为
+  `{day}|{event_type}`（每日每型至多一次）。
+- **群聊隔离**：群会话 `isolated=true`，不写账、不改关系。
+- **fail-closed**：未知 `event_type` 拒绝；存储异常返回 `degraded=true` 且不抛。
+- **账本**：情感权重入 `emotion_events`（规范 delta）；好感变更入 `affinity_ledger`
+  （写 `event_type` 列），受每日 `+0.10` / `-0.06` 与好感下限 `0.0` 约束（§9.2）。
+
+### 11.2 `get_emotion_context(umo, persona_id=None) -> dict`
+
+纯读、确定性、有界。返回 `{state, valence, recent, last_event, as_of, degraded}`：
+
+- `valence = Σ delta_i × 0.5^(age_hours/24)`（72h 窗口、半衰 24h），clamp `[-1, 1]`。
+- `recent`：最多 5 条 `{event_type, delta, ts}`，**绝不会含消息原文**。
+- 群聊 / 异常：返回降级中性态（`平静` / `0.0` / `[]`，`degraded=true`）。
+
+### 11.3 情绪状态（优先级首命中）
+
+| 优先级 | `state` | 条件 |
+| --- | --- | --- |
+| 1 | `受伤` | 12h 内出现 `misunderstood` **或** `valence ≤ -0.35` |
+| 2 | `回避` | `unanswered_streak ≥ 2` **或** 48h 内 `ignored_proactive ≥ 2` **或** `valence ≤ -0.15` |
+| 3 | `期待` | 12h 内正向事件 ≥ 1 **且** `valence ≥ +0.15` |
+| 4 | `开心` | `valence ≥ +0.25` |
+| 5 | `平静` | 其余 |
+
+## 12. 表达决策（v1.1 · Phase 2-C）
+
+### 12.1 `expression_decision(umo, persona_id=None) -> dict`
+
+返回 `{api_version, mode, style_hints, reason, degraded}`，同样纯读、无副作用。
+
+`mode ∈ {回避, 受伤, 放松, 活泼, 温暖, 亲近, 爱意}`，私聊按优先级首命中：
+
+| 优先级 | `mode` | 条件 |
+| --- | --- | --- |
+| 1 | `回避` | `emotion.state == 回避` 或 `unanswered_streak ≥ 2` |
+| 2 | `受伤` | `emotion.state == 受伤` |
+| 3 | `爱意` | `bond` 且 `stage == 亲密` 且 `valence ≥ 0` |
+| 4 | `亲近` | `stage ∈ {亲近, 亲密}` |
+| 5 | `温暖` | `stage ≥ 熟悉` 且 `valence ≥ 0` |
+| 6 | `活泼` | `valence ≥ +0.2` 且 `energy ≥ 0.6` |
+| 7 | `放松` | 兜底 |
+
+`style_hints = {tone, warmth, length_bias, proactive_bias}`（基准表见
+`core/emotion.py::STYLE_HINTS`）。`reason` 为人类可读理由，供日志/面板。
+
+### 12.2 群聊硬抑制
+
+群会话**永不**产生 `回避/受伤/亲近/爱意`：越档即回落 `放松`，`warmth` 再被
+`min(warmth, 0.55)` 截断，且不继承私聊情绪/关系。该抑制在 companion-core 与
+kanjyou 两层各执行一次（纵深防御）。
+
+### 12.3 与 kanjyou `persona_state` 的关系
+
+companion 可用时 `expression.mode + style_hints` 是**档位权威约束**；kanjyou 的
+`persona_state` 降为**风格细节**（数值调整总量 ≤ ±0.10，且不得改变 `mode`）。
+companion 不可用 → 完全走 `persona_state`（= v2.4.0 行为，零回归）。

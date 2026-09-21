@@ -9,12 +9,56 @@ Invariants (see ``docs/CONTRACT.md``):
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 
 #: Current target schema version.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
-#: Ordered (version, script) pairs. Scripts run at most once per database.
-MIGRATIONS: tuple[tuple[int, str], ...] = (
+#: A migration step is either a SQL script or a callable taking the connection
+#: (needed when the DDL must be guarded by a runtime check, e.g. column
+#: existence before ``ALTER TABLE``).
+MigrationStep = str | Callable[["sqlite3.Connection"], None]
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return whether ``table`` already has ``column`` (PRAGMA-based guard)."""
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """v4: emotion-event ledger + ``affinity_ledger.event_type`` (additive).
+
+    Pure increment: existing rows are never rewritten, and the new column is
+    added only when absent (``ADD COLUMN`` re-runs otherwise fail). Old code
+    (v1.0.0) keeps working: it never queries ``emotion_events`` and inserts
+    into ``affinity_ledger`` with an explicit column list, so the new column
+    takes its default ``''``.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS emotion_events (
+            persona_id TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            ts         TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            delta      REAL NOT NULL DEFAULT 0,
+            reason     TEXT NOT NULL DEFAULT '',
+            day        TEXT NOT NULL,
+            PRIMARY KEY (persona_id, user_id, dedupe_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_emotion_events_scope
+            ON emotion_events (persona_id, user_id, ts);
+        """
+    )
+    if not _column_exists(conn, "affinity_ledger", "event_type"):
+        conn.execute(
+            "ALTER TABLE affinity_ledger ADD COLUMN event_type TEXT NOT NULL DEFAULT ''"
+        )
+
+
+#: Ordered (version, step) pairs. Steps run at most once per database.
+MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (
         1,
         """
@@ -176,6 +220,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
             ON open_threads (umo, status, updated_at);
         """,
     ),
+    (4, _migrate_v4),
 )
 
 #: All tables that must exist after migration, used by tests/health checks.
@@ -189,6 +234,7 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "interaction_stats",
     "open_threads",
     "motivation_log",
+    "emotion_events",
 )
 
 
@@ -231,9 +277,12 @@ def apply_migrations(conn: sqlite3.Connection, target: int = SCHEMA_VERSION) -> 
     Returns the resulting schema version.
     """
     current = get_schema_version(conn)
-    for version, script in MIGRATIONS:
+    for version, step in MIGRATIONS:
         if current < version <= target:
-            conn.executescript(script)
+            if callable(step):
+                step(conn)
+            else:
+                conn.executescript(step)
             _set_schema_version(conn, version)
             current = version
     conn.commit()

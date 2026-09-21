@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -8,7 +8,9 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api.web import json_response
 
 from .core.contract import PLUGIN_NAME, PLUGIN_VERSION, ContractV1
+from .core.emotion import VALENCE_WINDOW_HOURS, emotion_snapshot, expression_for
 from .core.paths import get_db_path
+from .core.relationship import STAGE_STRANGER
 from .core.store import Store
 
 
@@ -48,6 +50,12 @@ class TCompanionCore(Star):
             ["GET"],
             "Motivation audit log (read-only)",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/emotion-state",
+            self.api_emotion_state,
+            ["GET"],
+            "Derived emotion state / expression mode per relationship (read-only)",
+        )
 
     async def initialize(self):
         db_path = get_db_path()
@@ -74,6 +82,72 @@ class TCompanionCore(Star):
             f"plugin_version={info['plugin_version']}"
         )
 
+    # -- Contract surface (cross-plugin boundary) --------------------------
+    # Downstream plugins (kanjyou) resolve this Star via
+    # ``context.get_registered_star(name).star_cls`` and ``getattr``. The
+    # frozen contract must therefore live on the Star instance too, not only on
+    # the private ``self.contract``; each method below is a thin delegate.
+    def _contract(self) -> ContractV1:
+        if self.contract is None:
+            raise RuntimeError("tcompanion_core contract not initialized")
+        return self.contract
+
+    async def get_contract_info(self) -> dict:
+        return await self._contract().get_contract_info()
+
+    async def get_life_state(self, persona_id: str) -> dict | None:
+        return await self._contract().get_life_state(persona_id)
+
+    async def get_relationship(self, umo: str, persona_id: str | None = None) -> dict:
+        return await self._contract().get_relationship(umo, persona_id)
+
+    async def get_proactive_context(self, umo: str, persona_id: str | None = None) -> dict:
+        return await self._contract().get_proactive_context(umo, persona_id)
+
+    async def on_proactive_outcome(
+        self,
+        umo: str,
+        *,
+        sent: bool,
+        reason_code: str,
+        replied: bool = False,
+        persona_id: str | None = None,
+        event_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        return await self._contract().on_proactive_outcome(
+            umo,
+            sent=sent,
+            reason_code=reason_code,
+            replied=replied,
+            persona_id=persona_id,
+            event_id=event_id,
+            now=now,
+        )
+
+    async def record_emotion_event(
+        self,
+        umo: str,
+        *,
+        event_type: str,
+        reason: str = "",
+        dedupe_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        return await self._contract().record_emotion_event(
+            umo,
+            event_type=event_type,
+            reason=reason,
+            dedupe_key=dedupe_key,
+            now=now,
+        )
+
+    async def get_emotion_context(self, umo: str, persona_id: str | None = None) -> dict:
+        return await self._contract().get_emotion_context(umo, persona_id)
+
+    async def expression_decision(self, umo: str, persona_id: str | None = None) -> dict:
+        return await self._contract().expression_decision(umo, persona_id)
+
     # -- Web API handlers (read-only panel) --------------------------------
     async def api_life_state(self):
         if self._store is None:
@@ -93,6 +167,43 @@ class TCompanionCore(Star):
             return json_response({"error": "store not ready"}, status_code=503)
         rows = self._store.list_motivation_log(limit=100)
         return json_response({"items": rows})
+
+    async def api_emotion_state(self):
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
+        day = now.date().isoformat()
+        items = []
+        for rel in self._store.list_relationships():
+            persona_id = str(rel.get("persona_id") or "")
+            user_id = str(rel.get("user_id") or "")
+            streak = self._store.get_interaction_dynamics(persona_id, user_id).unanswered_streak
+            events = self._store.list_emotion_events(
+                persona_id, user_id, since_iso=since, limit=200
+            )
+            snapshot = emotion_snapshot(events, now=now, unanswered_streak=streak)
+            life = self._store.get_life_state(persona_id, day) or {}
+            decision = expression_for(
+                state=snapshot["state"],
+                valence=snapshot["valence"],
+                stage=str(rel.get("stage") or STAGE_STRANGER),
+                bond=bool(rel.get("bond")),
+                energy=float(life.get("energy") or 0.0),
+                unanswered_streak=streak,
+            )
+            items.append(
+                {
+                    "persona_id": persona_id,
+                    "user_id": user_id,
+                    "state": snapshot["state"],
+                    "valence": snapshot["valence"],
+                    "last_event": snapshot["last_event"],
+                    "mode": decision["mode"],
+                    "as_of": snapshot["as_of"],
+                }
+            )
+        return json_response({"items": items})
 
     async def terminate(self):
         if self._store is not None:

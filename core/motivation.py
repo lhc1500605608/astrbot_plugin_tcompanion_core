@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+from .emotion import DAMPING_STATES
 from .relationship import (
     STAGE_ORDER,
     STAGE_STRANGER,
@@ -181,6 +182,7 @@ def fuse_motivation(
     scene: str = "",
     open_threads: Sequence[str] = (),
     allow: bool = True,
+    emotion_state: str = "",
 ) -> MotivationResult:
     """Fuse life event + open threads + time window into a scored candidate set.
 
@@ -189,10 +191,13 @@ def fuse_motivation(
     ``adopted`` is false when the unanswered streak is too high or the quota
     does not allow outreach; the reason is still reported so the outcome stays
     auditable.
+
+    ``emotion_state`` may only *dampen* the scores (``回避``/``受伤``, see
+    ``emotion.DAMPING_STATES``) — a positive emotion never boosts outreach.
     """
     index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 0
     stage_bonus = STAGE_BONUS_STEP * index
-    decay = ignored_decay_factor(unanswered_streak)
+    decay = ignored_decay_factor(unanswered_streak) * DAMPING_STATES.get(emotion_state, 1.0)
     candidates: list[MotivationCandidate] = []
 
     for position, label in enumerate(open_threads):

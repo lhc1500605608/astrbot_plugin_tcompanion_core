@@ -1,5 +1,5 @@
 name: astrbot_plugin_tcompanion_core # 插件唯一识别名（占位，以 astrbot_plugin_ 前缀开头）
 display_name: TCompanion Core # 用于展示的名字
-desc: TCompanion 核心基座：冻结契约 v1 + SQLite 存储 + LifeState/Schedule（Phase 1）。 # 插件简短描述
-version: v1.0.0 # 插件版本号
+desc: TCompanion 核心基座：冻结契约 v1 + SQLite 存储 + LifeState/Schedule（Phase 1）+ 情绪事件账本/表达决策（Phase 2-A/C）。 # 插件简短描述
+version: v1.1.0 # 插件版本号
 author: tcompanion # 作者

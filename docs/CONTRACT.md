@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.1 修订）
+# TCompanion Core — 冻结契约 v1（v1.2 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.1 为纯向后兼容增量**，见 §11/§12）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.1.0`）
+- 契约版本：`api_version = 1`（**v1.2 为纯向后兼容增量**，见 §11/§12/§13）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.2.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -13,6 +13,14 @@
 > 3. `get_proactive_context` 追加**可选**键 `emotion_state` / `expression`；
 > 4. schema 升级到 `4`（新表 `emotion_events` + `affinity_ledger.event_type`）。
 > `api_version` 恒为 `1`；老客户端忽略未知键即不受影响。
+>
+> v1.2 变更摘要（不破坏任何 v1.x 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `open_threads_followup`；
+> 2. 新增 `record_open_thread` / `get_open_threads` / `close_open_thread` /
+>    `mark_thread_followup`（同时挂 Star 实例与 `ContractV1`）；
+> 3. `get_proactive_context` 追加**可选**键 `open_thread_details`，
+>    `motivation.candidates[]` 追加可选 `thread_id`；`open_threads`（`str[]`）**冻结不变**；
+> 4. schema 升级到 `5`（`open_threads` 生命周期加列，纯增量、回填、不改旧行）。
 
 ## 1. 通用约定
 
@@ -41,12 +49,13 @@
 | `plugin` | `str` | 否 | 固定 `astrbot_plugin_tcompanion_core` |
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
-| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` |
+| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` |
 
 `capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
 数组属于破坏性变更，见 §8）。取值：`life_state/schedule/relationship/motivation/
 open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送/调度，
-只提供输入与回执）；v1.1 追加 `emotion=true` / `expression=true`。
+只提供输入与回执）；v1.1 追加 `emotion=true` / `expression=true`；v1.2 追加
+`open_threads_followup=true`（下游据此决定是否走未完话题续接链路）。
 
 ## 3. `get_life_state(persona_id) -> dict | None`
 
@@ -97,7 +106,8 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 | `relationship` | `dict \| None` | 否 | `{stage, affinity, bond, mode}`（§5.1） |
 | `expression_hints` | `dict \| None` | 否 | `{address, warmth, proactive_bias}`（§5.1） |
 | `motivation` | `dict \| None` | 否 | `{reason, score, adopted, blocked_reason, candidates}`（§10） |
-| `open_threads` | `str[]` | 否 | 短标签列表；缺省 `[]`；群聊恒 `[]` |
+| `open_threads` | `str[]` | 否 | 短标签列表（**冻结**）；缺省 `[]`；群聊恒 `[]` |
+| `open_thread_details` | `dict[]` | 否（v1.2 新增） | `{thread_id,label,kind,status,last_seen,followup_count,confidence}`；缺省 `[]`；群聊恒 `[]`（§13） |
 | `quota` | `dict` | 是 | `{hourly_remaining, daily_remaining, allow}` |
 | `unanswered_streak` | `int` | 是 | 连续未回应的主动消息数；缺省 `0` |
 | `emotion_state` | `dict \| None` | 否（v1.1 新增） | `{state, valence, last_event, as_of}`（§11.3）；群聊恒 `None` |
@@ -107,6 +117,9 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 > `emotion_state` / `expression` 是 v1.1 的**可选追加键**：老客户端（kanjyou
 > v2.5.0）忽略未知键即不碎；情绪只影响 `motivation` 评分（负向降权，**绝不提升**）
 > 与 `expression.style_hints.proactive_bias`，`quota` 结构保持冻结不变。
+> `open_thread_details` 是 v1.2 的**可选追加键**（与冻结的 `open_threads` 同批次、
+> 同顺序）；每条 `motivation.candidates[]` 追加可选 `thread_id`，供下游在发送后续接
+> 回执（`mark_thread_followup`）。
 
 **逐字段兜底**：每个域独立解析，任一域异常只让该字段退回默认，不阻断其余字段；
 调用方须逐字段 `.get()` 兜底。除 `api_version` 外全部可缺省。
@@ -154,11 +167,15 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 
 ## 5c. `open_threads` 派生（仅短标签）
 
-- 由调用方（observe 钩子）从会话提取**短标签**（如「周末电影推荐未给」），
-  经 `Store.upsert_open_thread()` 落库；`sanitize_thread_title()` 强制折叠空白
-  并截断到 40 字符，**绝不存消息原文**。
-- `get_proactive_context` 取最近 `updated_at` 的前 3 条 open 标签。
-- 与 tmemory 边界：原文只存 tmemory；companion-core Phase 1 不直连 tmemory。
+- 由调用方（observe 钩子）从会话提取**短标签**（如「周末电影推荐未给」），经
+  `record_open_thread()`（写入侧）落库；`sanitize_thread_title()` 强制折叠空白并
+  截断到 40 字符，`thread_id_for()` 由 `kind|规范化标签` 派生稳定 id，
+  **绝不存消息原文**（§13）。
+- `get_proactive_context` 取最近 `updated_at` 的前 3 条 **open** 标签，冻结的
+  `open_threads`（`str[]`）与新的 `open_thread_details`（含 `thread_id`/`kind`/
+  `status`/`last_seen`/`followup_count`/`confidence`）来自同一批次、同一顺序。
+- `get_open_threads()` 返回 `open` + `stale`（按新鲜度排序），供下游自行按状态过滤。
+- 与 tmemory 边界：原文只存 tmemory；companion-core 不直连 tmemory。
 
 ## 6. Kanjyou fail-closed 门（`core/kanjyou.py`）
 
@@ -188,7 +205,7 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 fail-closed 处理。回归由 `tests/test_star_surface.py` 钉住：断言 Star 的公开
 async 面与 `ContractV1` 完全一致。
 
-## 7. SQLite schema（`schema_version = 4`）
+## 7. SQLite schema（`schema_version = 5`）
 
 库文件：`get_astrbot_plugin_data_path()/astrbot_plugin_tcompanion_core/tcompanion_core.sqlite3`。
 
@@ -222,9 +239,17 @@ v4（v1.1，Phase 2-A）为**纯增量**：新增 `emotion_events` 表（主键
 - `emotion_events(persona_id, user_id, dedupe_key, ts, event_type, delta, reason,
   day)` —— 只追加；`delta` 为**逐事件规范值**（`±0.03` 内），不含消息原文。
 
+v5（v1.2，Phase 2-B）为**纯增量**：为 `open_threads` 追加生命周期列 `kind`（默认
+`'topic'`）/ `last_seen_ts` / `last_followup_ts` / `followup_count`（默认 `0`）/
+`source` / `confidence`（默认 `0.0`）/ `dedupe_key`（可空）/ `closed_reason`，并将
+`last_seen_ts` 一次性回填为 `updated_at`。所有 `ALTER TABLE` 均带 `PRAGMA table_info`
+存在性 guard，重复执行不报错；回填只作用于空值，**不改写任何旧行的既有列**。旧代码
+（v1.1.x）用显式列名插入，新列自动取默认值，故无需回滚。新增索引
+`(umo, persona_id, status, last_seen_ts)` 与 `(umo, persona_id, dedupe_key)`。
+
 > v1/v2 表仅存派生值、无消息原文，故重构/追加均安全；迁移仍幂等：
-> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v4；
-> 既有 v2/v3 库会安全原地升级到 v4。
+> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v5；
+> 既有 v2/v3/v4 库会安全原地升级到 v5。
 
 **隐私不变式**：以上任何表都不含消息原文/正文列。`life_state_daily.summary`
 为模型生成的当日生活摘要，`open_threads.title` 为话题标题，均非消息原文。
@@ -408,3 +433,55 @@ kanjyou 两层各执行一次（纵深防御）。
 companion 可用时 `expression.mode + style_hints` 是**档位权威约束**；kanjyou 的
 `persona_state` 降为**风格细节**（数值调整总量 ≤ ±0.10，且不得改变 `mode`）。
 companion 不可用 → 完全走 `persona_state`（= v2.4.0 行为，零回归）。
+
+## 13. 未完话题续接（v1.2 · Phase 2-B）
+
+实现：`core/motivation.py`（kind/阈值/`thread_id_for` 纯逻辑）+ `core/store.py`
+（`open_threads` 落库与生命周期）+ `core/contract.py`（写入/读取/关闭/回执四方法）。
+契约 API 版本仍为 `api_version = 1`（仅 schema 升级到 5，方法/字段为加法式）。
+
+### 13.1 数据模型与去重
+
+`open_threads` 在既有列上追加 `kind` / `last_seen_ts` / `last_followup_ts` /
+`followup_count` / `source` / `confidence` / `dedupe_key` / `closed_reason`（§7 v5）。
+
+- `kind ∈ {commitment, pending_question, plan, topic}`（未知值 fail-closed 拒绝）。
+- `status ∈ {open, stale, closed}`。
+- `thread_id` 由写入侧派生：`dedupe_key` 优先，否则 `thread:<sha1(kind|规范化标签)[:12]>`。
+  同一 `kind|label` 重复提及命中同一行 → 只 bump `last_seen_ts`/`updated_at`，**不新增行**。
+- 隐私：`title` 一律经 `sanitize_thread_title()`（折叠空白、≤40 字）；**无原文列**。
+
+### 13.2 四个契约方法
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `record_open_thread(umo, *, label, kind, reason="", dedupe_key=None, confidence=1.0, source="", now=None)` | `dict` | 写入/刷新一条；`label` 缩短为标签 |
+| `get_open_threads(umo, limit=3, persona_id=None)` | `dict[]` | 纯读；返回 `open`+`stale` |
+| `close_open_thread(umo, thread_id, reason="")` | `dict` | `closed_reason ∈ {answered, expired, superseded, …}` |
+| `mark_thread_followup(umo, thread_id, now=None)` | `dict` | 递增 `followup_count` + 记 `last_followup_ts` |
+
+- `record_open_thread` 返回 `{thread_id, umo, label, kind, status, isolated, applied, degraded}`
+  （群聊 `isolated=true`；未知 `kind` → `reason=unknown_kind, degraded=true`；空标签 →
+  `empty_label`；存储异常 → `storage_error, degraded=true`，**绝不抛**）。
+- `get_open_threads` 每条为 `{thread_id, label, kind, status, last_seen, followup_count,
+  confidence}`；群聊/异常返回 `[]`。
+- `close_open_thread` / `mark_thread_followup` 均按 `umo` 作用域；群聊为空操作
+  （`isolated=true`）；未命中 → `closed=false` / `reason=not_found`；异常 `degraded=true`。
+- **群聊隔离**：群会话不写、不读、不关闭、不回执私聊未完话题（结构隔离）。
+
+### 13.3 生命周期（`Store.expire_open_threads`，core 侧）
+
+- `open` → 超 `ttl_days`（默认 3）未提及 → `stale`（仍存，下游不作为续接候选）。
+- `stale`/`open` → 超 `expire_days`（默认 14）未提及 → `closed(reason=expired)`。
+- 被回应/完成 → `close_open_thread(reason=answered)`，不再作为候选。
+- 单 `(umo, persona_id)` 的 `open` 超 `max`（默认 20）→ 按 `last_seen_ts` LRU
+  关闭最旧，`closed_reason='superseded'`。阈值**全局**，不随关系阶段变化。
+
+### 13.4 消费契约（kanjyou 侧，见 plan §5）
+
+`get_proactive_context().open_thread_details` 中 `status=open` 且 `confidence ≥ 0.6`
+的条目才可作为续接候选；每次主动消息**至多续接 1 条**，且需满足冷却
+（`last_followup_ts`）、`followup_count < followup_max`、最小间隔、`quota.allow`、
+`unanswered_streak < 3`、`expression.proactive_bias ≥ 0` 等闸门。发送成功后调用
+`mark_thread_followup` 递增计数。core 缺失 / `api_version≠1` / 无
+`open_threads_followup` capability → 下游完全不调用（= 现状，零回归）。

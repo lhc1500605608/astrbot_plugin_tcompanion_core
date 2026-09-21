@@ -86,3 +86,149 @@ def test_open_memory_needs_no_directory(tmp_path, monkeypatch):
     finally:
         s.close()
     assert list(tmp_path.iterdir()) == []
+
+
+# -- schema v5 (open-thread lifecycle) ------------------------------------
+def test_schema_v5_open_thread_columns(store):
+    cols = {row[1] for row in store.connection.execute("PRAGMA table_info(open_threads)")}
+    assert set(schema.V5_OPEN_THREAD_COLUMNS) <= cols
+
+
+def test_migrate_v4_to_v5_in_place_preserves_and_backfills(tmp_path):
+    """Old v4 rows survive the upgrade; new columns take defaults + backfill."""
+    db_file = tmp_path / "v4.sqlite3"
+    conn = schema.connect(str(db_file))
+    try:
+        assert schema.apply_migrations(conn, target=4) == 4
+        conn.execute(
+            "INSERT INTO open_threads "
+            "(thread_id, umo, persona_id, title, status, opened_at, updated_at) "
+            "VALUES ('legacy', 'umo://u', 'p1', '旧话题', 'open', "
+            "'2026-09-10T10:00:00+00:00', '2026-09-11T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 5
+        row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
+        # old row untouched
+        assert row["title"] == "旧话题"
+        assert row["status"] == "open"
+        assert row["opened_at"] == "2026-09-10T10:00:00+00:00"
+        # new columns defaulted, last_seen_ts backfilled from updated_at
+        assert row["kind"] == "topic"
+        assert row["followup_count"] == 0
+        assert row["last_followup_ts"] == ""
+        assert row["closed_reason"] == ""
+        assert row["dedupe_key"] is None
+        assert row["last_seen_ts"] == "2026-09-11T10:00:00+00:00"
+    finally:
+        conn.close()
+
+
+def test_v5_migration_is_idempotent(tmp_path):
+    db_file = tmp_path / "v5.sqlite3"
+    conn = schema.connect(str(db_file))
+    try:
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
+        for _ in range(3):
+            schema._migrate_v5(conn)
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_open_threads_store_no_message_body(store):
+    """Privacy: still no raw-text column; titles are sanitized short labels."""
+    cols = {row[1] for row in store.connection.execute("PRAGMA table_info(open_threads)")}
+    assert not (cols & {"content", "text", "message", "raw", "body", "msg"})
+    row = store.upsert_open_thread("t1", "umo://u", "p1", "x" * 200)
+    assert len(row["title"]) <= 40
+    assert row["title"].endswith("…")
+
+
+def test_upsert_open_thread_bumps_instead_of_inserting(store):
+    first = store.upsert_open_thread(
+        "t1", "umo://u", "p1", "旧标签", kind="plan", confidence=0.8,
+        now=datetime(2026, 9, 20, 10, tzinfo=timezone.utc),
+    )
+    second = store.upsert_open_thread(
+        "t1", "umo://u", "p1", "新标签", kind="commitment", confidence=0.9,
+        now=datetime(2026, 9, 21, 10, tzinfo=timezone.utc),
+    )
+    assert first["thread_id"] == second["thread_id"] == "t1"
+    rows = store.list_open_thread_details("umo://u", "p1")
+    assert len(rows) == 1
+    assert rows[0]["title"] == "新标签"
+    assert rows[0]["kind"] == "commitment"
+    assert rows[0]["last_seen_ts"] == "2026-09-21T10:00:00+00:00"
+
+
+def test_touch_mark_followup_and_close(store):
+    store.upsert_open_thread("t1", "umo://u", "p1", "话题", now=datetime(2026, 9, 20, tzinfo=timezone.utc))
+
+    assert store.mark_thread_followup(
+        "t1", umo="umo://u", now=datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+    )["followup_count"] == 1
+    row = store.mark_thread_followup(
+        "t1", umo="umo://u", now=datetime(2026, 9, 20, 13, tzinfo=timezone.utc)
+    )
+    assert row["followup_count"] == 2
+    assert row["last_followup_ts"] == "2026-09-20T13:00:00+00:00"
+    # wrong scope must not touch the row
+    assert store.mark_thread_followup("t1", umo="other") is None
+
+    assert store.touch_open_thread(
+        "t1", umo="umo://u", now=datetime(2026, 9, 21, tzinfo=timezone.utc)
+    )
+    assert store.list_open_thread_details("umo://u", "p1")[0]["last_seen_ts"] == (
+        "2026-09-21T00:00:00+00:00"
+    )
+
+    assert store.close_open_thread(
+        "t1", datetime(2026, 9, 21, 1, tzinfo=timezone.utc), umo="umo://u", reason="answered"
+    )
+    closed = store.list_open_thread_details("umo://u", "p1", status="closed")[0]
+    assert closed["closed_reason"] == "answered"
+    # scoped close does not match another umo
+    assert not store.close_open_thread("t1", umo="other", reason="x")
+
+
+def test_expire_open_threads_ttl_stale_and_expire_closed(store):
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    store.upsert_open_thread(
+        "fresh", "umo://u", "p1", "新", now=datetime(2026, 9, 21, 11, tzinfo=timezone.utc)
+    )
+    store.upsert_open_thread(
+        "old", "umo://u", "p1", "旧", now=datetime(2026, 9, 15, tzinfo=timezone.utc)
+    )
+    store.upsert_open_thread(
+        "ancient", "umo://u", "p1", "远古", now=datetime(2026, 8, 1, tzinfo=timezone.utc)
+    )
+
+    counts = store.expire_open_threads(now, ttl_days=3, expire_days=14)
+    assert counts["stale"] == 1  # "old" -> stale
+    assert counts["expired"] == 1  # "ancient" -> closed(expired)
+
+    by_id = {row["thread_id"]: row for row in store.list_open_thread_details("umo://u", "p1")}
+    assert by_id["fresh"]["status"] == "open"
+    assert by_id["old"]["status"] == "stale"
+    assert by_id["ancient"]["status"] == "closed"
+    assert by_id["ancient"]["closed_reason"] == "expired"
+
+
+def test_expire_open_threads_lru_eviction(store):
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    for i in range(5):
+        store.upsert_open_thread(
+            f"t{i}",
+            "umo://u",
+            "p1",
+            f"标签{i}",
+            now=datetime(2026, 9, 21, 12 - i, tzinfo=timezone.utc),
+        )
+    counts = store.expire_open_threads(now, ttl_days=30, expire_days=60, max_open=3)
+    assert counts["evicted"] == 2
+    open_rows = store.list_open_thread_details("umo://u", "p1", status="open")
+    assert [row["thread_id"] for row in open_rows] == ["t0", "t1", "t2"]
+    evicted = store.list_open_thread_details("umo://u", "p1", status="closed")
+    assert {row["closed_reason"] for row in evicted} == {"superseded"}

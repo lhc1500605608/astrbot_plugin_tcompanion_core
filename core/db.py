@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Callable
 
 #: Current target schema version.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: A migration step is either a SQL script or a callable taking the connection
 #: (needed when the DDL must be guarded by a runtime check, e.g. column
@@ -55,6 +55,44 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE affinity_ledger ADD COLUMN event_type TEXT NOT NULL DEFAULT ''"
         )
+
+
+#: New ``open_threads`` columns added by v5 (name -> DDL tail after ``ADD COLUMN``).
+V5_OPEN_THREAD_COLUMNS: dict[str, str] = {
+    "kind": "kind TEXT NOT NULL DEFAULT 'topic'",
+    "last_seen_ts": "last_seen_ts TEXT NOT NULL DEFAULT ''",
+    "last_followup_ts": "last_followup_ts TEXT NOT NULL DEFAULT ''",
+    "followup_count": "followup_count INTEGER NOT NULL DEFAULT 0",
+    "source": "source TEXT NOT NULL DEFAULT ''",
+    "confidence": "confidence REAL NOT NULL DEFAULT 0.0",
+    "dedupe_key": "dedupe_key TEXT",
+    "closed_reason": "closed_reason TEXT NOT NULL DEFAULT ''",
+}
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """v5: open-thread lifecycle columns (additive).
+
+    Pure increment: every ``ALTER TABLE`` is guarded by ``PRAGMA table_info``,
+    so re-running is a no-op; **existing rows are never rewritten** except the
+    one-time ``last_seen_ts = updated_at`` backfill (guarded to empty values).
+    Old code (v1.1.x) keeps working: it inserts with an explicit column list, so
+    the new columns take their defaults.
+    """
+    for column, ddl in V5_OPEN_THREAD_COLUMNS.items():
+        if not _column_exists(conn, "open_threads", column):
+            conn.execute(f"ALTER TABLE open_threads ADD COLUMN {ddl}")
+    conn.execute(
+        "UPDATE open_threads SET last_seen_ts = updated_at WHERE last_seen_ts = ''"
+    )
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_open_threads_lifecycle
+            ON open_threads (umo, persona_id, status, last_seen_ts);
+        CREATE INDEX IF NOT EXISTS idx_open_threads_dedupe
+            ON open_threads (umo, persona_id, dedupe_key);
+        """
+    )
 
 
 #: Ordered (version, step) pairs. Steps run at most once per database.
@@ -221,6 +259,7 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
         """,
     ),
     (4, _migrate_v4),
+    (5, _migrate_v5),
 )
 
 #: All tables that must exist after migration, used by tests/health checks.

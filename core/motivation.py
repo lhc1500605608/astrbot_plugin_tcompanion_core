@@ -13,6 +13,7 @@ length so a caller can never smuggle raw text through this path.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -28,6 +29,29 @@ from .relationship import (
 THREAD_TITLE_MAX = 40
 #: Default number of open threads surfaced in ``get_proactive_context``.
 DEFAULT_OPEN_THREAD_LIMIT = 3
+
+#: Open-thread kinds (fail-closed: anything else is rejected upstream).
+OPEN_THREAD_KIND_COMMITMENT = "commitment"
+OPEN_THREAD_KIND_PENDING_QUESTION = "pending_question"
+OPEN_THREAD_KIND_PLAN = "plan"
+OPEN_THREAD_KIND_TOPIC = "topic"
+OPEN_THREAD_KINDS: tuple[str, ...] = (
+    OPEN_THREAD_KIND_COMMITMENT,
+    OPEN_THREAD_KIND_PENDING_QUESTION,
+    OPEN_THREAD_KIND_PLAN,
+    OPEN_THREAD_KIND_TOPIC,
+)
+
+#: Open-thread statuses.
+OPEN_THREAD_STATUS_OPEN = "open"
+OPEN_THREAD_STATUS_STALE = "stale"
+OPEN_THREAD_STATUS_CLOSED = "closed"
+
+#: Lifecycle thresholds (global; see ``docs/CONTRACT.md`` §13).
+OPEN_THREAD_TTL_DAYS = 3
+OPEN_THREAD_EXPIRE_DAYS = 14
+OPEN_THREAD_MAX = 20
+OPEN_THREAD_FOLLOWUP_MAX = 2
 
 #: Candidate score floor by source (frozen tuning; see docs/CONTRACT.md §10).
 OPEN_THREAD_BASE = 0.70
@@ -85,6 +109,20 @@ def sanitize_thread_title(title: str, *, max_len: int = THREAD_TITLE_MAX) -> str
     if len(cleaned) > max_len:
         cleaned = cleaned[: max_len - 1].rstrip() + "…"
     return cleaned
+
+
+def thread_id_for(kind: str, label: str, *, dedupe_key: str | None = None) -> str:
+    """Derive a stable thread id so repeated mentions bump instead of insert.
+
+    Callers may pin the id with ``dedupe_key``; otherwise it is a short hash of
+    ``kind|normalized label`` — the same unfinished item always maps to the same
+    row. The id never contains the raw label.
+    """
+    if dedupe_key:
+        return str(dedupe_key)
+    normalized = sanitize_thread_title(label).lower()
+    digest = hashlib.sha1(f"{kind}|{normalized}".encode()).hexdigest()[:12]
+    return f"thread:{digest}"
 
 
 def time_window(hour: int) -> tuple[str, str]:
@@ -145,6 +183,7 @@ class MotivationCandidate:
     label: str
     reason: str
     score: float
+    thread_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -181,6 +220,7 @@ def fuse_motivation(
     energy: float = 0.0,
     scene: str = "",
     open_threads: Sequence[str] = (),
+    open_thread_details: Sequence[dict] = (),
     allow: bool = True,
     emotion_state: str = "",
 ) -> MotivationResult:
@@ -192,6 +232,11 @@ def fuse_motivation(
     does not allow outreach; the reason is still reported so the outcome stays
     auditable.
 
+    ``open_thread_details`` (additive) carries ``{label, thread_id}`` so the
+    candidate set can echo the owning ``thread_id`` back to the caller; when it
+    is empty the plain ``open_threads`` labels are used and ``thread_id`` is
+    ``None``.
+
     ``emotion_state`` may only *dampen* the scores (``回避``/``受伤``, see
     ``emotion.DAMPING_STATES``) — a positive emotion never boosts outreach.
     """
@@ -200,7 +245,16 @@ def fuse_motivation(
     decay = ignored_decay_factor(unanswered_streak) * DAMPING_STATES.get(emotion_state, 1.0)
     candidates: list[MotivationCandidate] = []
 
-    for position, label in enumerate(open_threads):
+    pairs: list[tuple[str, str | None]] = []
+    if open_thread_details:
+        for detail in open_thread_details:
+            label = str(detail.get("label") or detail.get("title") or "")
+            if label:
+                pairs.append((label, detail.get("thread_id")))
+    else:
+        pairs = [(label, None) for label in open_threads]
+
+    for position, (label, thread_id) in enumerate(pairs):
         recency = OPEN_THREAD_RECENCY_BONUS if position == 0 else 0.0
         candidates.append(
             MotivationCandidate(
@@ -208,6 +262,7 @@ def fuse_motivation(
                 label=label,
                 reason=f"未完成话题「{label}」，想找机会收个尾。",
                 score=clamp01((OPEN_THREAD_BASE + recency + stage_bonus) * decay),
+                thread_id=thread_id,
             )
         )
 

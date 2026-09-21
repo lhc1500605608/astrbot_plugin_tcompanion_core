@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-09-21
+
+### Added
+- **Open-thread follow-up foundation (Phase 2-B)**: schema v5 extends `open_threads`
+  with lifecycle columns (`kind`/`last_seen_ts`/`last_followup_ts`/`followup_count`/
+  `source`/`confidence`/`dedupe_key`/`closed_reason`), pure increment with a one-time
+  `last_seen_ts = updated_at` backfill; old rows are never rewritten.
+- **Contract methods** (on both `ContractV1` and the `TCompanionCore` Star surface):
+  `record_open_thread`, `get_open_threads`, `close_open_thread`, `mark_thread_followup`.
+  Group scopes are isolated no-ops, unknown `kind` values are rejected fail-closed,
+  and storage failures degrade instead of raising.
+- **`get_contract_info().capabilities`** gains `open_threads_followup: true` (map shape
+  stays `dict[str, bool]`).
+- **`get_proactive_context`** gains the optional `open_thread_details`
+  (`thread_id/label/kind/status/last_seen/followup_count/confidence`); the frozen
+  `open_threads` (`str[]`) is unchanged, and `motivation.candidates[]` now carries an
+  optional `thread_id` for follow-up receipt bookkeeping.
+- **Store lifecycle**: `list_open_thread_details`, `touch_open_thread`,
+  `mark_thread_followup`, `close_open_thread(reason)`, `expire_open_threads`
+  (TTL → `stale`, expire → `closed`, per-scope LRU eviction).
+- **Config group** `open_thread` (`enabled`/`max`/`ttl_days`/`expire_days`/
+  `llm_judge_enabled`/`followup_max`).
+- `docs/CONTRACT.md` §13 (+ schema v5 text).
+
+### Notes
+- `api_version` stays `1`; all new keys are optional and older clients ignore them.
+- Privacy unchanged: short labels only, no raw-text columns.
+
 ## [1.1.1] - 2026-09-21
 
 ### Changed

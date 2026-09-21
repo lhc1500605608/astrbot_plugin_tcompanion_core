@@ -98,5 +98,48 @@
         "default": 0.55
       }
     }
+  },
+  "open_thread": {
+    "type": "object",
+    "description": "未完话题续接",
+    "hint": "记录对话里没说完的事，合适的时候自然提起一次。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用未完话题续接",
+        "hint": "关闭后不再记录和提起未完话题。",
+        "default": true
+      },
+      "max": {
+        "type": "int",
+        "description": "每人最多保留条数",
+        "hint": "超过上限时自动淘汰最旧的事项；默认 20 条。",
+        "default": 20
+      },
+      "ttl_days": {
+        "type": "int",
+        "description": "转为搁置的天数",
+        "hint": "超过该天数未被提起的事项不再延续；默认 3 天。",
+        "default": 3
+      },
+      "expire_days": {
+        "type": "int",
+        "description": "自动关闭的天数",
+        "hint": "超过该天数未被提起的事项自动关闭；默认 14 天。",
+        "default": 14
+      },
+      "llm_judge_enabled": {
+        "type": "bool",
+        "description": "启用 LLM 复核",
+        "hint": "当前版本仅按规则提取，此开关暂未生效。",
+        "default": false
+      },
+      "followup_max": {
+        "type": "int",
+        "description": "单条最多提起次数",
+        "hint": "同一件事最多主动提起几次；默认 2 次。",
+        "default": 2
+      }
+    }
   }
 }

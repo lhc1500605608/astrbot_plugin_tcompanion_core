@@ -42,7 +42,7 @@ core/store.py      # 存储读写（仅派生值，无消息原文）
 core/life_state.py # 生活状态与周模板日程
 core/emotion.py    # 情绪事件与表达档位
 core/kanjyou.py    # kanjyou 接入门禁
-_conf_schema.json  # emotion / expression 配置组
+_conf_schema.json  # emotion / expression / open_thread 配置组
 docs/CONTRACT.md   # 接口字段与降级说明
 tests/             # 单测
 ```

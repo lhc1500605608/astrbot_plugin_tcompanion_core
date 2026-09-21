@@ -10,13 +10,19 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import db as schema
 from .emotion import apply_emotion_affinity_delta, cap_emotion_delta
 from .life_state import WeeklySchedule
-from .motivation import DEFAULT_OPEN_THREAD_LIMIT, sanitize_thread_title
+from .motivation import (
+    DEFAULT_OPEN_THREAD_LIMIT,
+    OPEN_THREAD_EXPIRE_DAYS,
+    OPEN_THREAD_MAX,
+    OPEN_THREAD_TTL_DAYS,
+    sanitize_thread_title,
+)
 from .relationship import (
     DAILY_DECAY,
     InteractionDynamics,
@@ -651,9 +657,19 @@ class Store:
         title: str,
         *,
         status: str = "open",
+        kind: str = "topic",
+        source: str = "",
+        confidence: float = 0.0,
+        dedupe_key: str | None = None,
+        closed_reason: str = "",
         now: datetime | None = None,
     ) -> dict:
-        """Insert/update an open-thread row. Title is reduced to a short label."""
+        """Insert/update an open-thread row. Title is reduced to a short label.
+
+        Idempotent by ``thread_id``: a repeat mention refreshes
+        ``title/status/last_seen_ts/updated_at`` and never inserts a second row
+        (nor resets the follow-up counters).
+        """
         moment = now or _utcnow()
         label = sanitize_thread_title(title)
         stamp = moment.isoformat()
@@ -661,14 +677,36 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO open_threads
-                    (thread_id, umo, persona_id, title, status, opened_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (thread_id, umo, persona_id, title, status, opened_at, updated_at,
+                     kind, last_seen_ts, last_followup_ts, followup_count, source,
+                     confidence, dedupe_key, closed_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
+                    kind = excluded.kind,
+                    source = excluded.source,
+                    confidence = excluded.confidence,
+                    dedupe_key = excluded.dedupe_key,
+                    closed_reason = excluded.closed_reason,
+                    last_seen_ts = excluded.last_seen_ts,
                     updated_at = excluded.updated_at
                 """,
-                (thread_id, umo, persona_id, label, status, stamp, stamp),
+                (
+                    thread_id,
+                    umo,
+                    persona_id,
+                    label,
+                    status,
+                    stamp,
+                    stamp,
+                    kind,
+                    stamp,
+                    source,
+                    float(confidence or 0.0),
+                    dedupe_key,
+                    closed_reason,
+                ),
             )
             self._conn.commit()
         return {
@@ -676,7 +714,14 @@ class Store:
             "umo": umo,
             "persona_id": persona_id,
             "title": label,
+            "label": label,
             "status": status,
+            "kind": kind,
+            "source": source,
+            "confidence": float(confidence or 0.0),
+            "dedupe_key": dedupe_key,
+            "closed_reason": closed_reason,
+            "last_seen_ts": stamp,
             "updated_at": stamp,
         }
 
@@ -698,16 +743,181 @@ class Store:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
-    def close_open_thread(self, thread_id: str, now: datetime | None = None) -> bool:
-        """Mark a thread closed. Returns ``True`` when a row was updated."""
-        moment = now or _utcnow()
+    def list_open_thread_details(
+        self,
+        umo: str,
+        persona_id: str | None = None,
+        status: str | Sequence[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return open-thread rows (with lifecycle columns) for ``umo``.
+
+        ``status`` accepts a single status or a sequence of them; ``None`` means
+        every status. Ordered by ``last_seen_ts`` (newest first).
+        """
+        sql = "SELECT * FROM open_threads WHERE umo = ?"
+        params: list = [umo]
+        if persona_id is not None:
+            sql += " AND persona_id = ?"
+            params.append(persona_id)
+        if status is not None:
+            wanted = (status,) if isinstance(status, str) else tuple(status)
+            if wanted:
+                placeholders = ", ".join("?" for _ in wanted)
+                sql += f" AND status IN ({placeholders})"
+                params.extend(wanted)
+        sql += " ORDER BY last_seen_ts DESC, updated_at DESC, thread_id LIMIT ?"
+        params.append(max(0, int(limit)))
         with self._lock:
-            cursor = self._conn.execute(
-                "UPDATE open_threads SET status = 'closed', updated_at = ? WHERE thread_id = ?",
-                (moment.isoformat(), thread_id),
-            )
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def touch_open_thread(
+        self,
+        thread_id: str,
+        *,
+        umo: str | None = None,
+        status: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Refresh a thread's ``last_seen_ts`` (and optionally ``status``)."""
+        moment = now or _utcnow()
+        assignments = ["last_seen_ts = ?", "updated_at = ?"]
+        params: list = [moment.isoformat(), moment.isoformat()]
+        if status is not None:
+            assignments.insert(0, "status = ?")
+            params.insert(0, status)
+        sql = f"UPDATE open_threads SET {', '.join(assignments)} WHERE thread_id = ?"
+        params.append(thread_id)
+        if umo is not None:
+            sql += " AND umo = ?"
+            params.append(umo)
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def mark_thread_followup(
+        self, thread_id: str, *, umo: str | None = None, now: datetime | None = None
+    ) -> dict | None:
+        """Record one proactive follow-up: bump the counter + stamp the time."""
+        moment = now or _utcnow()
+        sql = (
+            "UPDATE open_threads SET followup_count = followup_count + 1, last_followup_ts = ? "
+            "WHERE thread_id = ?"
+        )
+        params: list = [moment.isoformat(), thread_id]
+        if umo is not None:
+            sql += " AND umo = ?"
+            params.append(umo)
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
+            self._conn.commit()
+            if cursor.rowcount == 0:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM open_threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def close_open_thread(
+        self,
+        thread_id: str,
+        now: datetime | None = None,
+        *,
+        umo: str | None = None,
+        reason: str = "",
+    ) -> bool:
+        """Mark a thread closed. Returns ``True`` when a row was updated."""
+        moment = now or _utcnow()
+        sql = (
+            "UPDATE open_threads SET status = 'closed', closed_reason = ?, updated_at = ? "
+            "WHERE thread_id = ?"
+        )
+        params: list = [reason, moment.isoformat(), thread_id]
+        if umo is not None:
+            sql += " AND umo = ?"
+            params.append(umo)
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    def expire_open_threads(
+        self,
+        now: datetime | None = None,
+        *,
+        ttl_days: int = OPEN_THREAD_TTL_DAYS,
+        expire_days: int = OPEN_THREAD_EXPIRE_DAYS,
+        max_open: int = OPEN_THREAD_MAX,
+    ) -> dict:
+        """Advance the open-thread lifecycle; returns per-stage counts.
+
+        * hard expiry first: untouched for ``expire_days`` -> ``closed(expired)``;
+        * TTL: untouched for ``ttl_days`` -> ``stale`` (kept, no longer a candidate);
+        * LRU: per ``(umo, persona_id)`` keep the ``max_open`` newest ``open``
+          rows and close the overflow with ``closed_reason='superseded'``.
+
+        Idempotent for a given ``now``: already-stale/closed rows are not touched
+        again by the earlier stages.
+        """
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        ttl_cutoff = (moment - timedelta(days=max(0, int(ttl_days)))).isoformat()
+        expire_cutoff = (moment - timedelta(days=max(0, int(expire_days)))).isoformat()
+        with self._lock:
+            expired = self._conn.execute(
+                """
+                UPDATE open_threads
+                   SET status = 'closed', closed_reason = 'expired', updated_at = ?
+                 WHERE status IN ('open', 'stale') AND last_seen_ts != ''
+                   AND last_seen_ts < ?
+                """,
+                (stamp, expire_cutoff),
+            ).rowcount
+            stale = self._conn.execute(
+                """
+                UPDATE open_threads
+                   SET status = 'stale', updated_at = ?
+                 WHERE status = 'open' AND last_seen_ts != ''
+                   AND last_seen_ts < ?
+                """,
+                (stamp, ttl_cutoff),
+            ).rowcount
+            evicted = 0
+            if max_open >= 0:
+                scopes = self._conn.execute(
+                    """
+                    SELECT umo, persona_id FROM open_threads
+                     WHERE status = 'open'
+                     GROUP BY umo, persona_id
+                    HAVING COUNT(*) > ?
+                    """,
+                    (int(max_open),),
+                ).fetchall()
+                for scope in scopes:
+                    overflow = self._conn.execute(
+                        """
+                        SELECT thread_id FROM open_threads
+                         WHERE umo = ? AND persona_id = ? AND status = 'open'
+                         ORDER BY last_seen_ts DESC, thread_id
+                         LIMIT -1 OFFSET ?
+                        """,
+                        (scope["umo"], scope["persona_id"], int(max_open)),
+                    ).fetchall()
+                    for row in overflow:
+                        cursor = self._conn.execute(
+                            """
+                            UPDATE open_threads
+                               SET status = 'closed', closed_reason = 'superseded',
+                                   updated_at = ?
+                             WHERE thread_id = ?
+                            """,
+                            (stamp, row["thread_id"]),
+                        )
+                        evicted += cursor.rowcount
+            self._conn.commit()
+        return {"stale": stale, "expired": expired, "evicted": evicted}
 
     def list_open_threads(self, status: str | None = None, limit: int = 200) -> list[dict]:
         """Return open-thread rows for the read-only panel."""

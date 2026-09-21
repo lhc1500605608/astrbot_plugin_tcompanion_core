@@ -414,7 +414,7 @@ async def test_negative_emotion_only_dampens_motivation(store):
 
 # -- schema v4 -------------------------------------------------------------
 def test_schema_v4_tables_and_columns(store):
-    assert store.schema_version == 4
+    assert store.schema_version == schema.SCHEMA_VERSION
     assert "emotion_events" in store.table_names()
     cols = {row[1] for row in store.connection.execute("PRAGMA table_info(affinity_ledger)")}
     assert "event_type" in cols
@@ -433,22 +433,23 @@ def test_v3_database_upgrades_in_place_without_rewriting(tmp_path):
         )
         conn.commit()
 
-        assert schema.apply_migrations(conn) == 4
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
         row = conn.execute("SELECT * FROM affinity_ledger WHERE event_id = 'legacy'").fetchone()
         assert row["delta"] == pytest.approx(0.03)
         assert row["event_type"] == ""
-        assert schema.get_schema_version(conn) == 4
+        assert schema.get_schema_version(conn) == schema.SCHEMA_VERSION
 
-        # the guard makes the ALTER re-runnable without error
+        # the guards make the ALTERs re-runnable without error
         schema._migrate_v4(conn)
-        assert schema.apply_migrations(conn) == 4
+        schema._migrate_v5(conn)
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
     finally:
         conn.close()
 
 
 def test_v4_migration_is_idempotent(store):
     for _ in range(3):
-        assert store.migrate() == 4
+        assert store.migrate() == schema.SCHEMA_VERSION
     assert set(schema.EXPECTED_TABLES).issubset(store.table_names())
 
 

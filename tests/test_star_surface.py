@@ -35,6 +35,10 @@ CONTRACT_METHODS = frozenset(
         "record_emotion_event",
         "get_emotion_context",
         "expression_decision",
+        "record_open_thread",
+        "get_open_threads",
+        "close_open_thread",
+        "mark_thread_followup",
     }
 )
 
@@ -180,6 +184,26 @@ async def test_star_forwards_keyword_arguments(star_cls, store):
         "dedupe_key": "msg:1",
         "now": None,
     }
+
+
+async def test_star_delegates_open_thread_roundtrip(star_cls, store):
+    """The kanjyou path for Phase 2-B: record via the Star, then read it back."""
+    star = _make_star(star_cls, store)
+    umo = "webchat:FriendMessage:webchat!qa498!probe"
+
+    recorded = await star.record_open_thread(umo, label="明天发方案", kind="commitment")
+    assert recorded["applied"] is True
+    thread_id = recorded["thread_id"]
+
+    items = await star.get_open_threads(umo)
+    assert [item["thread_id"] for item in items] == [thread_id]
+
+    marked = await star.mark_thread_followup(umo, thread_id)
+    assert marked["followup_count"] == 1
+
+    closed = await star.close_open_thread(umo, thread_id, reason="answered")
+    assert closed["closed"] is True
+    assert await star.get_open_threads(umo) == []
 
 
 async def test_star_without_contract_fails_closed(star_cls):

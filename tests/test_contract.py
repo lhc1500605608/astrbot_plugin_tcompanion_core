@@ -144,3 +144,141 @@ async def test_storage_failure_degrades_not_raises(store):
     assert state["degraded"] is True
     rel = await contract.get_relationship("umo://a")
     assert rel["degraded"] is True
+
+
+# -- open threads (v1.2 · Phase 2-B) --------------------------------------
+UMO = "aiocqhttp:FriendMessage:67890"
+GROUP_UMO = "aiocqhttp:GroupMessage:67890"
+
+
+async def test_open_threads_capability_bit(store):
+    contract = ContractV1(store)
+    info = await contract.get_contract_info()
+    assert info["capabilities"]["open_threads_followup"] is True
+    assert all(isinstance(value, bool) for value in info["capabilities"].values())
+
+
+async def test_record_open_thread_sanitizes_and_dedupes(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    first = await contract.record_open_thread(
+        UMO, label="  周末\n电影推荐未给  ", kind="commitment", confidence=0.8, source="kanjyou:rule"
+    )
+    assert first["applied"] is True
+    assert first["label"] == "周末 电影推荐未给"
+    assert first["status"] == "open"
+
+    # same kind|label -> same thread, recency bumped, still one row
+    second = await contract.record_open_thread(
+        UMO, label="周末 电影推荐未给", kind="commitment"
+    )
+    assert second["thread_id"] == first["thread_id"]
+    assert len(store.list_open_thread_details(UMO, "default")) == 1
+
+
+async def test_record_open_thread_truncates_long_label(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    result = await contract.record_open_thread(UMO, label="长" * 200, kind="plan")
+    assert len(result["label"]) <= 40
+    stored = store.list_open_thread_details(UMO, "default")[0]
+    assert len(stored["title"]) <= 40
+
+
+async def test_get_open_threads_shape_and_limit(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    for index, kind in enumerate(("commitment", "plan", "topic", "commitment")):
+        await contract.record_open_thread(UMO, label=f"话题{index}", kind=kind)
+    items = await contract.get_open_threads(UMO, limit=3)
+    assert len(items) == 3
+    assert set(items[0]) == {
+        "thread_id",
+        "label",
+        "kind",
+        "status",
+        "last_seen",
+        "followup_count",
+        "confidence",
+    }
+
+
+async def test_close_and_mark_followup_roundtrip(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    recorded = await contract.record_open_thread(UMO, label="明天发方案", kind="commitment")
+    thread_id = recorded["thread_id"]
+
+    marked = await contract.mark_thread_followup(UMO, thread_id)
+    assert marked["updated"] is True
+    assert marked["followup_count"] == 1
+
+    closed = await contract.close_open_thread(UMO, thread_id, reason="answered")
+    assert closed["closed"] is True
+    active = await contract.get_open_threads(UMO)
+    assert active == []
+    assert await contract.mark_thread_followup(UMO, "missing-id") == {
+        "thread_id": "missing-id",
+        "updated": False,
+        "followup_count": 0,
+        "last_followup_ts": "",
+        "isolated": False,
+        "reason": "not_found",
+        "degraded": False,
+    }
+
+
+async def test_open_thread_group_scopes_are_isolated(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    recorded = await contract.record_open_thread(GROUP_UMO, label="私聊话题", kind="topic")
+    assert recorded["isolated"] is True
+    assert recorded["applied"] is False
+    assert await contract.get_open_threads(GROUP_UMO) == []
+    assert (await contract.close_open_thread(GROUP_UMO, "x"))["isolated"] is True
+    assert (await contract.mark_thread_followup(GROUP_UMO, "x"))["isolated"] is True
+    assert store.list_open_thread_details(GROUP_UMO) == []
+
+
+async def test_record_open_thread_rejects_unknown_kind(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    result = await contract.record_open_thread(UMO, label="话题", kind="not_a_kind")
+    assert result["reason"] == "unknown_kind"
+    assert result["degraded"] is True
+    assert store.list_open_thread_details(UMO) == []
+
+
+async def test_open_thread_methods_degrade_on_storage_error(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    store.close()
+    recorded = await contract.record_open_thread(UMO, label="话题", kind="topic")
+    assert recorded["degraded"] is True
+    assert recorded["reason"] == "storage_error"
+    assert await contract.get_open_threads(UMO) == []
+    assert (await contract.close_open_thread(UMO, "t"))["degraded"] is True
+    assert (await contract.mark_thread_followup(UMO, "t"))["degraded"] is True
+
+
+async def test_proactive_context_open_thread_details_additive(store):
+    contract = ContractV1(
+        store, schedule=WeeklySchedule.default_template("p1"), clock=_fixed_clock()
+    )
+    await contract.record_open_thread(
+        UMO, label="论文还没改", kind="plan", confidence=0.8
+    )
+    ctx = await contract.get_proactive_context(UMO)
+    assert ctx["open_threads"] == ["论文还没改"]  # frozen str[] unchanged
+    details = ctx["open_thread_details"]
+    assert len(details) == 1
+    assert details[0]["label"] == "论文还没改"
+    assert details[0]["kind"] == "plan"
+    assert details[0]["status"] == "open"
+    assert details[0]["thread_id"]
+    # motivation candidates echo the thread id for receipt bookkeeping
+    candidate = next(
+        item for item in ctx["motivation"]["candidates"] if item["key"].startswith("open_thread")
+    )
+    assert candidate["thread_id"] == details[0]["thread_id"]
+
+
+async def test_group_context_has_empty_open_thread_details(store):
+    contract = ContractV1(store, clock=_fixed_clock())
+    ctx = await contract.get_proactive_context(GROUP_UMO)
+    assert ctx["open_threads"] == []
+    assert ctx["open_thread_details"] == []
+

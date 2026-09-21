@@ -24,10 +24,15 @@ from .emotion import (
 from .life_state import WeeklySchedule, generate_life_state
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
+    OPEN_THREAD_KINDS,
+    OPEN_THREAD_STATUS_OPEN,
+    OPEN_THREAD_STATUS_STALE,
     build_quota,
     expression_hints,
     fuse_motivation,
     relationship_mode,
+    sanitize_thread_title,
+    thread_id_for,
 )
 from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
 from .store import Store
@@ -36,7 +41,7 @@ from .store import Store
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.1.1"
+PLUGIN_VERSION = "1.2.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -124,6 +129,8 @@ class ContractV1:
                 # additive v1.1 keys (Phase 2-A/2-C); the map shape is frozen
                 "emotion": True,
                 "expression": True,
+                # additive v1.2 key (Phase 2-B); the map shape stays dict[str, bool]
+                "open_threads_followup": True,
             },
         }
 
@@ -206,7 +213,8 @@ class ContractV1:
         ``expression_hints`` / ``motivation`` / ``open_threads`` / ``quota`` /
         ``unanswered_streak`` (plus the v1 echo fields ``umo`` / ``persona_id``
         / ``degraded``). v1.1 adds the optional keys ``emotion_state`` and
-        ``expression``; older clients ignore unknown keys.
+        ``expression``; v1.2 adds the optional ``open_thread_details`` list
+        (older clients ignore unknown keys).
         """
         moment = self._clock()
         degraded = False
@@ -325,12 +333,16 @@ class ContractV1:
 
         # open threads (short labels; group sessions never inherit private ones)
         open_threads: list[str] = []
+        open_thread_details: list[dict] = []
         if not is_group:
             try:
                 rows = self._store.resolve_open_threads(
                     umo, resolved_persona, limit=DEFAULT_OPEN_THREAD_LIMIT
                 )
                 open_threads = [row["title"] for row in rows if row.get("title")]
+                open_thread_details = [
+                    self._thread_view(row) for row in rows if row.get("title")
+                ]
             except Exception:
                 degraded = True
 
@@ -360,6 +372,7 @@ class ContractV1:
                 energy=(life_state or {}).get("energy", 0.0),
                 scene=(life_state or {}).get("scene", ""),
                 open_threads=tuple(open_threads),
+                open_thread_details=tuple(open_thread_details),
                 allow=bool(quota.get("allow")),
                 emotion_state=emotion_name,
             ).to_dict()
@@ -385,6 +398,7 @@ class ContractV1:
             "expression_hints": hints,
             "motivation": motivation,
             "open_threads": open_threads,
+            "open_thread_details": open_thread_details,
             "quota": quota,
             "unanswered_streak": streak,
             "emotion_state": emotion_state,
@@ -464,6 +478,163 @@ class ContractV1:
             "duplicate": False,
             "isolated": False,
             "dynamics": dynamics.to_dict(),
+        }
+
+    # -- open threads (v1.2) -----------------------------------------------
+    async def record_open_thread(
+        self,
+        umo: str,
+        *,
+        label: str,
+        kind: str,
+        reason: str = "",
+        dedupe_key: str | None = None,
+        confidence: float = 1.0,
+        source: str = "",
+        now: datetime | None = None,
+    ) -> dict:
+        """Record or refresh one unfinished item for a private scope.
+
+        ``label`` is reduced to a short tag (never raw text). Repeated mentions
+        of the same ``kind|label`` map to one row and only bump its recency;
+        pass a stable ``dedupe_key`` to pin a thread id. Group scopes are
+        isolated, unknown ``kind`` values are rejected fail-closed, and a
+        storage failure degrades instead of raising.
+        """
+        moment = now or self._clock()
+        base = {
+            "thread_id": None,
+            "umo": umo,
+            "label": "",
+            "kind": kind,
+            "status": OPEN_THREAD_STATUS_OPEN,
+            "isolated": False,
+            "applied": False,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "reason": "bad_umo", "degraded": True}
+        if key.is_group:
+            return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        if kind not in OPEN_THREAD_KINDS:
+            return {**base, "reason": "unknown_kind", "degraded": True}
+        cleaned = sanitize_thread_title(label)
+        if not cleaned:
+            return {**base, "reason": "empty_label", "degraded": True}
+
+        resolved = self._resolve_persona(key.user_id)
+        thread_id = thread_id_for(kind, cleaned, dedupe_key=dedupe_key)
+        try:
+            row = self._store.upsert_open_thread(
+                thread_id,
+                umo,
+                resolved,
+                cleaned,
+                status=OPEN_THREAD_STATUS_OPEN,
+                kind=kind,
+                source=source,
+                confidence=max(0.0, min(1.0, float(confidence or 0.0))),
+                dedupe_key=dedupe_key,
+                now=moment,
+            )
+        except Exception:
+            return {**base, "reason": "storage_error", "degraded": True}
+        return {
+            **base,
+            "thread_id": thread_id,
+            "persona_id": resolved,
+            "label": row.get("title") or cleaned,
+            "status": row.get("status") or OPEN_THREAD_STATUS_OPEN,
+            "applied": True,
+            "reason": reason,
+            "degraded": False,
+        }
+
+    async def get_open_threads(
+        self, umo: str, limit: int = DEFAULT_OPEN_THREAD_LIMIT, persona_id: str | None = None
+    ) -> list[dict]:
+        """Return unfinished items for ``umo`` (open + stale), newest first.
+
+        Pure read. Group scopes and failures return ``[]``; each item is
+        ``{thread_id, label, kind, status, last_seen, followup_count,
+        confidence}`` with short labels only.
+        """
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return []
+        if key.is_group:
+            return []
+        resolved = persona_id or self._resolve_persona(key.user_id)
+        try:
+            rows = self._store.list_open_thread_details(
+                umo,
+                resolved,
+                status=(OPEN_THREAD_STATUS_OPEN, OPEN_THREAD_STATUS_STALE),
+                limit=limit,
+            )
+        except Exception:
+            return []
+        return [self._thread_view(row) for row in rows]
+
+    async def close_open_thread(self, umo: str, thread_id: str, reason: str = "") -> dict:
+        """Close one unfinished item (``answered`` / ``expired`` / ``superseded``).
+
+        Group scopes are isolated no-ops; a storage failure degrades. Returns
+        ``{thread_id, closed, isolated, reason, degraded}``.
+        """
+        base = {"thread_id": thread_id, "closed": False, "isolated": False, "reason": reason}
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "reason": "bad_umo", "degraded": True}
+        if key.is_group:
+            return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        try:
+            closed = self._store.close_open_thread(
+                thread_id, self._clock(), umo=umo, reason=reason
+            )
+        except Exception:
+            return {**base, "reason": "storage_error", "degraded": True}
+        return {**base, "closed": bool(closed), "degraded": False}
+
+    async def mark_thread_followup(
+        self, umo: str, thread_id: str, now: datetime | None = None
+    ) -> dict:
+        """Record that ``thread_id`` was followed up in a proactive message.
+
+        Bumps ``followup_count`` and stamps ``last_followup_ts`` for the
+        cooldown/cap gates. Group scopes and unknown ids are no-ops; failures
+        degrade. Returns ``{thread_id, updated, followup_count, isolated,
+        degraded}``.
+        """
+        moment = now or self._clock()
+        base = {
+            "thread_id": thread_id,
+            "updated": False,
+            "followup_count": 0,
+            "last_followup_ts": "",
+            "isolated": False,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "reason": "bad_umo", "degraded": True}
+        if key.is_group:
+            return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        try:
+            row = self._store.mark_thread_followup(thread_id, umo=umo, now=moment)
+        except Exception:
+            return {**base, "reason": "storage_error", "degraded": True}
+        if row is None:
+            return {**base, "reason": "not_found", "degraded": False}
+        return {
+            **base,
+            "updated": True,
+            "followup_count": int(row.get("followup_count") or 0),
+            "last_followup_ts": row.get("last_followup_ts") or "",
+            "degraded": False,
         }
 
     # -- emotion ledger (v1.1) ---------------------------------------------
@@ -619,6 +790,19 @@ class ContractV1:
             return state.persona_id if state is not None else DEFAULT_PERSONA_ID
         except Exception:
             return DEFAULT_PERSONA_ID
+
+    @staticmethod
+    def _thread_view(row: dict) -> dict:
+        """Project one open-thread row to the public short-label shape."""
+        return {
+            "thread_id": row.get("thread_id"),
+            "label": row.get("title") or "",
+            "kind": row.get("kind") or "topic",
+            "status": row.get("status") or OPEN_THREAD_STATUS_OPEN,
+            "last_seen": row.get("last_seen_ts") or row.get("updated_at") or "",
+            "followup_count": int(row.get("followup_count") or 0),
+            "confidence": float(row.get("confidence") or 0.0),
+        }
 
     def _expression_payload(self, decision: dict) -> dict:
         return {

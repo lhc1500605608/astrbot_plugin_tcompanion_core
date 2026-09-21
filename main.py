@@ -125,6 +125,42 @@ class TCompanionCore(Star):
             now=now,
         )
 
+    async def record_open_thread(
+        self,
+        umo: str,
+        *,
+        label: str,
+        kind: str,
+        reason: str = "",
+        dedupe_key: str | None = None,
+        confidence: float = 1.0,
+        source: str = "",
+        now: datetime | None = None,
+    ) -> dict:
+        return await self._contract().record_open_thread(
+            umo,
+            label=label,
+            kind=kind,
+            reason=reason,
+            dedupe_key=dedupe_key,
+            confidence=confidence,
+            source=source,
+            now=now,
+        )
+
+    async def get_open_threads(
+        self, umo: str, limit: int = 3, persona_id: str | None = None
+    ) -> list[dict]:
+        return await self._contract().get_open_threads(umo, limit=limit, persona_id=persona_id)
+
+    async def close_open_thread(self, umo: str, thread_id: str, reason: str = "") -> dict:
+        return await self._contract().close_open_thread(umo, thread_id, reason=reason)
+
+    async def mark_thread_followup(
+        self, umo: str, thread_id: str, now: datetime | None = None
+    ) -> dict:
+        return await self._contract().mark_thread_followup(umo, thread_id, now=now)
+
     async def record_emotion_event(
         self,
         umo: str,

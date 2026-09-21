@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-09-21
+
+### Changed
+- Copy-only release (TMEAAA-489): rewrote all user-visible `_conf_schema.json`
+  descriptions/hints, plugin description and README to drop internal terminology
+  (phase/roadmap labels, internal function and key names, version behaviour notes).
+  No key names, defaults or behaviour changed.
+
 ## [1.1.0] - 2026-09-21
 
 ### Added

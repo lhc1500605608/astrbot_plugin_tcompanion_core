@@ -36,7 +36,7 @@ from .store import Store
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"

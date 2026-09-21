@@ -17,7 +17,7 @@ from .core.store import Store
 @register(
     PLUGIN_NAME,
     "tcompanion",
-    "TCompanion 核心基座：冻结契约 v1 + SQLite 存储 + LifeState/Schedule（Phase 1）。",
+    "TCompanion 核心基座：为 AstrBot 提供关系好感度、生活状态与情绪表达档位的持久化数据。",
     PLUGIN_VERSION,
 )
 class TCompanionCore(Star):

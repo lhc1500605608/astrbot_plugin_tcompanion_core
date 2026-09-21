@@ -1,49 +1,49 @@
 {
   "emotion": {
     "type": "object",
-    "description": "情绪事件账本（Phase 2-A）",
-    "hint": "事件判定在 kanjyou 侧零 LLM 完成，经 record_emotion_event 上报；此处为阈值与词表默认值，companion-core 只负责落账与情绪状态演算。",
+    "description": "情绪事件账本",
+    "hint": "记录感谢、误解等情绪事件并据此调整好感度；阈值与词表可在此调整。",
     "items": {
       "enabled": {
         "type": "bool",
         "description": "启用情绪事件账本",
-        "hint": "关闭后 record_emotion_event 直接返回 degraded，不写库。",
+        "hint": "关闭后不再记录情绪事件，好感度也不会因对话变化。",
         "default": true
       },
       "reply_window_hours": {
         "type": "int",
         "description": "主动消息回复窗口（小时）",
-        "hint": "主动消息发出后该窗口内收到用户消息即结算 valued_reply（+0.03）。",
+        "hint": "主动消息发出后，该时间内收到回复则好感度 +0.03。",
         "default": 6
       },
       "ignore_window_hours": {
         "type": "int",
         "description": "主动消息忽略窗口（小时）",
-        "hint": "主动消息发出后该窗口内无用户消息即结算 ignored_proactive（-0.02）；与回复窗口共用 proactive:<send_ts> 键，先到者生效。",
+        "hint": "主动消息发出后，该时间内没有收到回复则好感度 -0.02。",
         "default": 6
       },
       "daily_positive_cap": {
         "type": "float",
         "description": "每日好感正向上限",
-        "hint": "沿用 Phase 1 的每日 +0.10 上限，情绪正向事件共用该额度。",
+        "hint": "每天因正向情绪事件最多增加的好感度。",
         "default": 0.1
       },
       "daily_negative_cap": {
         "type": "float",
         "description": "每日好感负向上限",
-        "hint": "情绪负向事件每日最多扣 0.06，且好感下限为 0.0。",
+        "hint": "每天因负向情绪事件最多扣减的好感度；好感度最低为 0。",
         "default": 0.06
       },
       "llm_judge_enabled": {
         "type": "bool",
-        "description": "启用短 LLM 情绪判定",
-        "hint": "v1.1.0 未实现，保留配置位；保持关闭即走零 LLM 词表判定。",
+        "description": "启用 LLM 情绪判定",
+        "hint": "当前版本仅按词表判定，此开关暂未生效。",
         "default": false
       },
       "keywords": {
         "type": "object",
-        "description": "零 LLM 词表（可覆盖）",
-        "hint": "ASCII 大小写不敏感；改写词表后需重启生效。",
+        "description": "关键词表（可自定义）",
+        "hint": "英文词不区分大小写；修改后需重启插件生效。",
         "items": {
           "gratitude": {
             "type": "list",
@@ -63,7 +63,7 @@
           "cold_shoulder": {
             "type": "list",
             "description": "敷衍词表",
-            "hint": "连续 3 条长度 <=2 且命中该词表视为 cold_shoulder。",
+            "hint": "连续 3 条不超过 2 个字且命中该词表时，判定为敷衍。",
             "default": ["嗯", "哦", "好", "呃", "?", "？"]
           }
         }
@@ -72,13 +72,13 @@
   },
   "expression": {
     "type": "object",
-    "description": "七档表达决策（Phase 2-C）",
-    "hint": "companion-core 只用 emotion_state 演算表达档位；persona_state 作为风格细节由 kanjyou 叠加。",
+    "description": "情绪表达档位",
+    "hint": "根据当前情绪挑选表达档位；人物的语气风格由上层插件叠加。",
     "items": {
       "enabled": {
         "type": "bool",
         "description": "启用表达决策",
-        "hint": "关闭后 expression_decision 返回 degraded 默认档（放松）。",
+        "hint": "关闭后始终使用兜底档位。",
         "default": true
       },
       "default_mode": {
@@ -89,12 +89,12 @@
       "group_allowed_modes": {
         "type": "list",
         "description": "群聊允许档位",
-        "hint": "群聊永不出现亲密档；warmth 另受 group_warmth_cap 限制。",
+        "hint": "群聊不会出现亲密档位，且温暖程度受下方上限限制。",
         "default": ["放松", "活泼", "温暖"]
       },
       "group_warmth_cap": {
         "type": "float",
-        "description": "群聊 warmth 上限",
+        "description": "群聊温暖程度上限",
         "default": 0.55
       }
     }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -281,4 +281,120 @@ async def test_group_context_has_empty_open_thread_details(store):
     ctx = await contract.get_proactive_context(GROUP_UMO)
     assert ctx["open_threads"] == []
     assert ctx["open_thread_details"] == []
+
+
+# -- open-thread lifecycle wiring (TMEAAA-502) ----------------------------
+NOW = datetime(2026, 9, 21, 9, 30, tzinfo=timezone.utc)
+CFG = {
+    "open_thread": {
+        "enabled": True,
+        "max": 20,
+        "ttl_days": 3,
+        "expire_days": 14,
+        "followup_max": 2,
+    }
+}
+
+
+def _configured(store, config=None):
+    return ContractV1(store, clock=lambda: NOW, config=config if config is not None else CFG)
+
+
+async def test_read_path_expires_40_day_thread_out_of_candidates(store):
+    """Regression (TMEAAA-502): a 40-day-old thread must leave the candidates."""
+    store.upsert_open_thread(
+        "ancient", UMO, "default", "远古话题", now=NOW - timedelta(days=40)
+    )
+    contract = _configured(store)
+
+    ctx = await contract.get_proactive_context(UMO)
+    assert ctx["open_threads"] == []
+    assert ctx["open_thread_details"] == []
+
+    row = store.list_open_thread_details(UMO, "default")[0]
+    assert (row["status"], row["closed_reason"]) == ("closed", "expired")
+
+
+async def test_read_path_marks_stale_and_drops_from_candidates(store):
+    store.upsert_open_thread(
+        "old", UMO, "default", "搁置话题", now=NOW - timedelta(days=5)
+    )
+    contract = _configured(store)
+
+    ctx = await contract.get_proactive_context(UMO)
+    assert ctx["open_thread_details"] == []
+
+    items = await contract.get_open_threads(UMO)
+    assert [item["status"] for item in items] == ["stale"]
+    assert store.list_open_thread_details(UMO, "default")[0]["status"] == "stale"
+
+
+async def test_read_path_enforces_max_open_eviction(store):
+    cfg = {"open_thread": {"enabled": True, "max": 2, "ttl_days": 30, "expire_days": 60}}
+    for index in range(3):
+        store.upsert_open_thread(
+            f"t{index}", UMO, "default", f"话题{index}", now=NOW - timedelta(hours=index)
+        )
+    contract = _configured(store, cfg)
+
+    await contract.get_open_threads(UMO)
+
+    open_rows = store.list_open_thread_details(UMO, "default", status="open")
+    assert [row["thread_id"] for row in open_rows] == ["t0", "t1"]
+    closed = store.list_open_thread_details(UMO, "default", status="closed")
+    assert {row["closed_reason"] for row in closed} == {"superseded"}
+
+
+async def test_open_thread_disabled_turns_section_off(store):
+    """`enabled=false`: all four methods no-op, candidates empty, no writes."""
+    cfg = {"open_thread": {"enabled": False}}
+    contract = _configured(store, cfg)
+
+    recorded = await contract.record_open_thread(UMO, label="话题", kind="topic")
+    assert recorded["applied"] is False
+    assert recorded["reason"] == "disabled"
+    assert store.list_open_thread_details(UMO) == []
+
+    assert await contract.get_open_threads(UMO) == []
+    assert (await contract.close_open_thread(UMO, "t"))["reason"] == "disabled"
+    assert (await contract.mark_thread_followup(UMO, "t"))["reason"] == "disabled"
+
+    ctx = await contract.get_proactive_context(UMO)
+    assert ctx["open_threads"] == []
+    assert ctx["open_thread_details"] == []
+
+
+async def test_disabled_section_does_not_advance_lifecycle(store):
+    store.upsert_open_thread(
+        "ancient", UMO, "default", "远古话题", now=NOW - timedelta(days=40)
+    )
+    contract = _configured(store, {"open_thread": {"enabled": False}})
+    await contract.get_proactive_context(UMO)
+    row = store.list_open_thread_details(UMO, "default")[0]
+    assert (row["status"], row["closed_reason"]) == ("open", "")
+
+
+async def test_open_thread_config_is_reparsed_on_each_read(store):
+    """Hot-reload: editing the injected mapping takes effect without restart."""
+    cfg = {"open_thread": {"enabled": True}}
+    contract = _configured(store, cfg)
+    assert (await contract.record_open_thread(UMO, label="话题", kind="topic"))["applied"]
+
+    cfg["open_thread"]["enabled"] = False
+    assert await contract.get_open_threads(UMO) == []
+    assert (await contract.record_open_thread(UMO, label="新话题", kind="topic"))[
+        "reason"
+    ] == "disabled"
+
+
+async def test_contract_info_exposes_effective_open_thread_config(store):
+    contract = _configured(store, {"open_thread": {"max": 7, "ttl_days": 2}})
+    info = await contract.get_contract_info()
+    assert info["open_thread"] == {
+        "enabled": True,
+        "max_open": 7,
+        "ttl_days": 2,
+        "expire_days": 14,
+        "followup_max": 2,
+    }
 

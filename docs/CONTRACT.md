@@ -20,7 +20,9 @@
 >    `mark_thread_followup`（同时挂 Star 实例与 `ContractV1`）；
 > 3. `get_proactive_context` 追加**可选**键 `open_thread_details`，
 >    `motivation.candidates[]` 追加可选 `thread_id`；`open_threads`（`str[]`）**冻结不变**；
-> 4. schema 升级到 `5`（`open_threads` 生命周期加列，纯增量、回填、不改旧行）。
+> 4. schema 升级到 `5`（`open_threads` 生命周期加列，纯增量、回填、不改旧行）；
+> 5. `get_contract_info()` 追加**可选**键 `open_thread`（生效配置回显）；生命周期
+>    由两条读取路径幂等驱动，支持 `open_thread.enabled=false` 整体关闭（§13.3）。
 
 ## 1. 通用约定
 
@@ -50,6 +52,7 @@
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
 | `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` |
+| `open_thread` | `dict` | 否（v1.2 新增） | 生效后的未完话题配置（默认值已补齐）：`{enabled, max_open, ttl_days, expire_days, followup_max}` |
 
 `capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
 数组属于破坏性变更，见 §8）。取值：`life_state/schedule/relationship/motivation/
@@ -94,8 +97,10 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 
 ## 5. `get_proactive_context(umo, persona_id=None) -> dict`
 
-下游消费者（kanjyou 等）的聚合入口。**纯读、无副作用**（状态变更只经
-`on_proactive_outcome` 与 observe 钩子）。v1 全字段如下：
+下游消费者（kanjyou 等）的聚合入口。**纯读**：不改写关系/情绪/账本状态
+（业务状态变更只经 `on_proactive_outcome` 与 observe 钩子）。**唯一例外**是未完
+话题的生命周期维护：本方法在读取前做一次幂等的 TTL/过期/LRU 推进（§13.3），
+因为 core 自身不启动调度器。v1 全字段如下：
 
 | 字段 | 类型 | 必含 | 说明 |
 | --- | --- | --- | --- |
@@ -175,6 +180,9 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
   `open_threads`（`str[]`）与新的 `open_thread_details`（含 `thread_id`/`kind`/
   `status`/`last_seen`/`followup_count`/`confidence`）来自同一批次、同一顺序。
 - `get_open_threads()` 返回 `open` + `stale`（按新鲜度排序），供下游自行按状态过滤。
+- 两条读取路径（`get_proactive_context` / `get_open_threads`）在返回前各做一次
+  幂等的生命周期推进（§13.3）；`open_thread.enabled=false` 时整体关闭：不推进、
+  不返回候选，四个方法均按关闭处理（`reason=disabled`）。
 - 与 tmemory 边界：原文只存 tmemory；companion-core 不直连 tmemory。
 
 ## 6. Kanjyou fail-closed 门（`core/kanjyou.py`）
@@ -331,6 +339,10 @@ v5（v1.2，Phase 2-B）为**纯增量**：为 `open_threads` 追加生命周期
   否则 `quota.allow=false` → `blocked_reason=quota`；否则采纳。
   被拦截时仍回填 `score/reason/candidates` 以便追溯。
 - 返回 `motivation = {reason, score, adopted, blocked_reason, candidates[]}`。
+- **不泄露标签**：`open_thread` 候选的 `reason` 为**不含短标签**的泛化措辞
+  （`OPEN_THREAD_REASON`），短标签只保留在审计用的 `label` 字段。原因：`reason`
+  会被下游直接注入 prompt，若携带标签将绕过续接闸门（冷却/次数上限/开关，
+  TMEAAA-504）。标签只经 `open_thread_details` → 闸门续接块注入（§13.4）。
 
 ### 10.2 `motivation_log` 审计列
 
@@ -469,13 +481,31 @@ companion 不可用 → 完全走 `persona_state`（= v2.4.0 行为，零回归�
   （`isolated=true`）；未命中 → `closed=false` / `reason=not_found`；异常 `degraded=true`。
 - **群聊隔离**：群会话不写、不读、不关闭、不回执私聊未完话题（结构隔离）。
 
-### 13.3 生命周期（`Store.expire_open_threads`，core 侧）
+### 13.3 生命周期（`Store.expire_open_threads` → 读取路径触发，core 侧）
 
 - `open` → 超 `ttl_days`（默认 3）未提及 → `stale`（仍存，下游不作为续接候选）。
 - `stale`/`open` → 超 `expire_days`（默认 14）未提及 → `closed(reason=expired)`。
 - 被回应/完成 → `close_open_thread(reason=answered)`，不再作为候选。
-- 单 `(umo, persona_id)` 的 `open` 超 `max`（默认 20）→ 按 `last_seen_ts` LRU
+- 单 `(umo, persona_id)` 的 `open` 超 `max_open`（默认 20）→ 按 `last_seen_ts` LRU
   关闭最旧，`closed_reason='superseded'`。阈值**全局**，不随关系阶段变化。
+
+**触发点（core 不引入调度器）**：`get_proactive_context` 与 `get_open_threads`
+两条读取路径在读取前各调用一次 `Store.expire_open_threads(cfg)`。理由：下游
+决策循环本来就会调用这两个入口，生命周期随消费自然推进；代价固定为三条有界
+SQL，对给定 `now` 幂等；无需新增任务/钩子，也不改变 `capabilities.proactive=false`
+（core 仍不发送、不调度）。
+
+**配置读取**：`core/motivation.py::parse_open_thread_config()` 解析 AstrBot 配置组
+`open_thread`，映射为 `OpenThreadConfig{enabled, max_open, ttl_days, expire_days,
+followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().open_thread`
+回显生效值）。配置对象每次读取时重新解析，故配置页热更新立即生效。
+
+- `enabled=false`：上述四个契约方法全部按关闭处理（`record_open_thread` →
+  `applied=false, reason=disabled`；`get_open_threads` → `[]`；
+  `close_open_thread` / `mark_thread_followup` → `reason=disabled`），且**不推进**生命周期；
+  `get_proactive_context` 的 `open_threads` / `open_thread_details` 恒为 `[]`。
+- `followup_max` 由 core 透出（`get_contract_info().open_thread`），供下游作为续接
+  次数上限使用（core 自身不消费该值）。
 
 ### 13.4 消费契约（kanjyou 侧，见 plan §5）
 

@@ -28,8 +28,9 @@ class TCompanionCore(Star):
     sends messages on its own; the only reply is a user-triggered diagnostic.
     """
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config=None):
         super().__init__(context)
+        self.config = config or {}
         self._store: Store | None = None
         self.contract: ContractV1 | None = None
         context.register_web_api(
@@ -60,7 +61,7 @@ class TCompanionCore(Star):
     async def initialize(self):
         db_path = get_db_path()
         self._store = Store.open(db_path)
-        self.contract = ContractV1(self._store)
+        self.contract = ContractV1(self._store, config=self.config)
         logger.info(
             "[tcompanion_core] initialized: contract v%s schema v%s db=%s",
             self.contract.api_version,

@@ -27,9 +27,11 @@ from .motivation import (
     OPEN_THREAD_KINDS,
     OPEN_THREAD_STATUS_OPEN,
     OPEN_THREAD_STATUS_STALE,
+    OpenThreadConfig,
     build_quota,
     expression_hints,
     fuse_motivation,
+    parse_open_thread_config,
     relationship_mode,
     sanitize_thread_title,
     thread_id_for,
@@ -101,10 +103,12 @@ class ContractV1:
         store: Store,
         schedule: WeeklySchedule | None = None,
         clock: Callable[[], datetime] | None = None,
+        config=None,
     ) -> None:
         self._store = store
         self._schedule = schedule
         self._clock = clock or _utcnow
+        self._config = config
 
     # -- info --------------------------------------------------------------
     async def get_contract_info(self) -> dict:
@@ -132,6 +136,8 @@ class ContractV1:
                 # additive v1.2 key (Phase 2-B); the map shape stays dict[str, bool]
                 "open_threads_followup": True,
             },
+            # additive v1.2: the effective open_thread group (defaults applied)
+            "open_thread": self._open_thread_config().to_dict(),
         }
 
     # -- life state --------------------------------------------------------
@@ -336,13 +342,18 @@ class ContractV1:
         open_thread_details: list[dict] = []
         if not is_group:
             try:
-                rows = self._store.resolve_open_threads(
-                    umo, resolved_persona, limit=DEFAULT_OPEN_THREAD_LIMIT
-                )
-                open_threads = [row["title"] for row in rows if row.get("title")]
-                open_thread_details = [
-                    self._thread_view(row) for row in rows if row.get("title")
-                ]
+                cfg = self._open_thread_config()
+                if cfg.enabled:
+                    # Read-path lifecycle maintenance: no scheduler by design,
+                    # so surfacing candidates is where TTL/expiry/LRU advance.
+                    self._advance_open_thread_lifecycle(moment, cfg)
+                    rows = self._store.resolve_open_threads(
+                        umo, resolved_persona, limit=DEFAULT_OPEN_THREAD_LIMIT
+                    )
+                    open_threads = [row["title"] for row in rows if row.get("title")]
+                    open_thread_details = [
+                        self._thread_view(row) for row in rows if row.get("title")
+                    ]
             except Exception:
                 degraded = True
 
@@ -517,6 +528,8 @@ class ContractV1:
             return {**base, "reason": "bad_umo", "degraded": True}
         if key.is_group:
             return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        if not self._open_thread_config().enabled:
+            return {**base, "reason": "disabled", "degraded": False}
         if kind not in OPEN_THREAD_KINDS:
             return {**base, "reason": "unknown_kind", "degraded": True}
         cleaned = sanitize_thread_title(label)
@@ -556,9 +569,10 @@ class ContractV1:
     ) -> list[dict]:
         """Return unfinished items for ``umo`` (open + stale), newest first.
 
-        Pure read. Group scopes and failures return ``[]``; each item is
-        ``{thread_id, label, kind, status, last_seen, followup_count,
-        confidence}`` with short labels only.
+        Advances the lifecycle (TTL/stale/expiry/LRU) before reading. Group
+        scopes, a disabled ``open_thread`` section and failures all return
+        ``[]``; each item is ``{thread_id, label, kind, status, last_seen,
+        followup_count, confidence}`` with short labels only.
         """
         try:
             key = parse_umo(umo)
@@ -566,7 +580,11 @@ class ContractV1:
             return []
         if key.is_group:
             return []
+        cfg = self._open_thread_config()
+        if not cfg.enabled:
+            return []
         resolved = persona_id or self._resolve_persona(key.user_id)
+        self._advance_open_thread_lifecycle(self._clock(), cfg)
         try:
             rows = self._store.list_open_thread_details(
                 umo,
@@ -591,6 +609,8 @@ class ContractV1:
             return {**base, "reason": "bad_umo", "degraded": True}
         if key.is_group:
             return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        if not self._open_thread_config().enabled:
+            return {**base, "reason": "disabled", "degraded": False}
         try:
             closed = self._store.close_open_thread(
                 thread_id, self._clock(), umo=umo, reason=reason
@@ -623,6 +643,8 @@ class ContractV1:
             return {**base, "reason": "bad_umo", "degraded": True}
         if key.is_group:
             return {**base, "isolated": True, "reason": "group_isolated", "degraded": False}
+        if not self._open_thread_config().enabled:
+            return {**base, "reason": "disabled", "degraded": False}
         try:
             row = self._store.mark_thread_followup(thread_id, umo=umo, now=moment)
         except Exception:
@@ -783,6 +805,35 @@ class ContractV1:
         return self._expression_payload(decision)
 
     # -- internals ---------------------------------------------------------
+    def _open_thread_config(self) -> OpenThreadConfig:
+        """Parse the ``open_thread`` group; defaults on any failure.
+
+        Re-parsed on every call because AstrBot hot-reload mutates the injected
+        config mapping in place — a cached snapshot would ignore edits until
+        the next restart.
+        """
+        try:
+            return parse_open_thread_config(self._config)
+        except Exception:
+            return OpenThreadConfig()
+
+    def _advance_open_thread_lifecycle(self, moment: datetime, cfg: OpenThreadConfig) -> None:
+        """Idempotently advance TTL/stale/expiry/LRU in the read path.
+
+        companion-core deliberately owns no scheduler, so the open-thread read
+        paths perform one bounded maintenance pass (three SQL statements); it
+        is idempotent for a given ``now`` and never raises into a read.
+        """
+        try:
+            self._store.expire_open_threads(
+                moment,
+                ttl_days=cfg.ttl_days,
+                expire_days=cfg.expire_days,
+                max_open=cfg.max_open,
+            )
+        except Exception:
+            pass
+
     def _resolve_persona(self, user_id: str) -> str:
         """Resolve the persona owning ``user_id`` (falls back to default)."""
         try:

@@ -9,6 +9,7 @@ import pytest
 from core.contract import ContractV1, QuotaView
 from core.life_state import WeeklySchedule
 from core.motivation import (
+    OPEN_THREAD_REASON,
     build_quota,
     expression_hints,
     fuse_motivation,
@@ -68,6 +69,20 @@ def test_open_thread_outranks_life_and_time():
     assert ordered[0] == "open_thread:0"
     assert "life_event" in ordered
     assert any(key.startswith("time:") for key in ordered)
+
+
+def test_open_thread_reason_is_label_free():
+    # The short label must stay out of every reason so it cannot bypass the
+    # downstream follow-up gate; it flows only through open_thread_details.
+    label = "那本蓝色笔记本"
+    result = fuse_motivation(moment=_moment(hour=10), open_threads=(label,))
+    open_candidates = [c for c in result.candidates if c.key.startswith("open_thread")]
+    assert open_candidates
+    for candidate in open_candidates:
+        assert candidate.reason == OPEN_THREAD_REASON
+        assert label not in candidate.reason
+    assert result.reason == OPEN_THREAD_REASON
+    assert label not in result.reason
 
 
 def test_streak_and_quota_block_adoption_but_stay_traceable():
@@ -171,6 +186,23 @@ async def test_contract_context_full_v1(store):
     assert ctx["unanswered_streak"] == 0
     assert ctx["quota"] == build_quota(0, 0)
     assert ctx["degraded"] is False
+
+
+async def test_contract_motivation_reason_hides_open_thread_label(store):
+    label = "那本蓝色笔记本"
+    store.upsert_open_thread("t1", UMO, "p1", label)
+    contract = ContractV1(store, clock=_clock(10))
+    ctx = await contract.get_proactive_context(UMO, persona_id="p1")
+
+    # Label must not ride any motivation channel (only open_thread_details may,
+    # and that is gated downstream). TMEAAA-504.
+    assert ctx["motivation"]["reason"]
+    assert label not in ctx["motivation"]["reason"]
+    for candidate in ctx["motivation"]["candidates"]:
+        assert label not in candidate["reason"]
+    # The gated channel still carries the label for the follow-up block.
+    assert ctx["open_thread_details"][0]["label"] == label
+    assert label in ctx["open_threads"]
 
 
 async def test_contract_context_is_pure_read(store):

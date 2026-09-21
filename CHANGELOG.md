@@ -26,6 +26,23 @@ All notable changes to this project will be documented in this file.
   `llm_judge_enabled`/`followup_max`).
 - `docs/CONTRACT.md` §13 (+ schema v5 text).
 
+### Fixed
+- **Open-thread lifecycle is now actually wired at runtime (TMEAAA-502)**: the
+  `open_thread` config group was previously never read, so `ttl_days`/`expire_days`/
+  `max` had no effect and stale threads kept surfacing as candidates. The two read
+  paths (`get_proactive_context`, `get_open_threads`) now run one idempotent
+  `expire_open_threads()` pass before reading (TTL→`stale`, expiry→`closed(expired)`,
+  per-scope LRU→`closed(superseded)`), and `enabled=false` turns the whole section
+  off (all four methods no-op, no candidates, no lifecycle writes).
+  `get_contract_info().open_thread` echoes the effective config (defaults applied);
+  config is re-parsed on every read so hot-reload takes effect without a restart.
+- **Open-thread labels no longer ride `motivation.reason` (TMEAAA-504)**: the
+  `open_thread` candidates used to embed the short label in their `reason`
+  (`未完成话题「…」`), which downstream injects verbatim into the proactive prompt
+  and thereby bypassed the follow-up gate (cooldown / `followup_max` / switch).
+  The reason is now a label-free wording; the label flows only through
+  `open_thread_details` → the gated follow-up block.
+
 ### Notes
 - `api_version` stays `1`; all new keys are optional and older clients ignore them.
 - Privacy unchanged: short labels only, no raw-text columns.

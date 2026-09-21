@@ -47,15 +47,78 @@ OPEN_THREAD_STATUS_OPEN = "open"
 OPEN_THREAD_STATUS_STALE = "stale"
 OPEN_THREAD_STATUS_CLOSED = "closed"
 
-#: Lifecycle thresholds (global; see ``docs/CONTRACT.md`` §13).
+#: Lifecycle thresholds (defaults; user-overridable via the ``open_thread``
+#: config group — see ``docs/CONTRACT.md`` §13).
 OPEN_THREAD_TTL_DAYS = 3
 OPEN_THREAD_EXPIRE_DAYS = 14
 OPEN_THREAD_MAX = 20
 OPEN_THREAD_FOLLOWUP_MAX = 2
 
+
+@dataclass(frozen=True)
+class OpenThreadConfig:
+    """Effective ``open_thread`` config group (already coerced + defaulted).
+
+    ``enabled=False`` turns the whole open-thread section off; ``max_open`` is
+    the per-scope retention cap, ``ttl_days``/``expire_days`` drive the
+    lifecycle, ``followup_max`` is exposed for the downstream follow-up cap.
+    """
+
+    enabled: bool = True
+    max_open: int = OPEN_THREAD_MAX
+    ttl_days: int = OPEN_THREAD_TTL_DAYS
+    expire_days: int = OPEN_THREAD_EXPIRE_DAYS
+    followup_max: int = OPEN_THREAD_FOLLOWUP_MAX
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _cfg_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _cfg_int(value, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_open_thread_config(config) -> OpenThreadConfig:
+    """Read the ``open_thread`` group from an AstrBot config mapping.
+
+    Fail-safe: a missing/!mapping group or an unparseable value falls back to
+    the documented default, so a malformed config never disables the section
+    or raises into a read path. Parsed fresh on each call (config hot-reload
+    mutates the injected ``AstrBotConfig`` in place).
+    """
+    section: dict = {}
+    if isinstance(config, dict):
+        raw = config.get("open_thread")
+        if isinstance(raw, dict):
+            section = raw
+    return OpenThreadConfig(
+        enabled=_cfg_bool(section.get("enabled"), True),
+        max_open=_cfg_int(section.get("max"), OPEN_THREAD_MAX),
+        ttl_days=_cfg_int(section.get("ttl_days"), OPEN_THREAD_TTL_DAYS),
+        expire_days=_cfg_int(section.get("expire_days"), OPEN_THREAD_EXPIRE_DAYS),
+        followup_max=_cfg_int(section.get("followup_max"), OPEN_THREAD_FOLLOWUP_MAX),
+    )
+
 #: Candidate score floor by source (frozen tuning; see docs/CONTRACT.md §10).
 OPEN_THREAD_BASE = 0.70
 OPEN_THREAD_RECENCY_BONUS = 0.15
+#: Label-free wording for an open-thread motivation. The short label must never
+#: ride the reason: it is injected only through the gated follow-up block, so a
+#: label here would bypass the downstream cooldown/cap/switch (TMEAAA-504).
+OPEN_THREAD_REASON = "有件对方提过、还没收尾的事，想找机会提一句。"
 LIFE_EVENT_BASE = 0.45
 TIME_WINDOW_BASE = 0.30
 #: Per-stage additive bonus (index into ``STAGE_ORDER``) capped at 4 steps.
@@ -237,6 +300,11 @@ def fuse_motivation(
     is empty the plain ``open_threads`` labels are used and ``thread_id`` is
     ``None``.
 
+    Open-thread candidates carry a **label-free** ``reason`` (label only in the
+    audit ``label`` field): the short label is injected downstream solely through
+    the gated follow-up block, so putting it in ``reason`` would leak past the
+    cooldown/cap/switch gate (TMEAAA-504).
+
     ``emotion_state`` may only *dampen* the scores (``回避``/``受伤``, see
     ``emotion.DAMPING_STATES``) — a positive emotion never boosts outreach.
     """
@@ -260,7 +328,7 @@ def fuse_motivation(
             MotivationCandidate(
                 key=f"open_thread:{position}",
                 label=label,
-                reason=f"未完成话题「{label}」，想找机会收个尾。",
+                reason=OPEN_THREAD_REASON,
                 score=clamp01((OPEN_THREAD_BASE + recency + stage_bonus) * decay),
                 thread_id=thread_id,
             )

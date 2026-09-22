@@ -141,5 +141,42 @@
         "default": 2
       }
     }
+  },
+  "memory_bridge": {
+    "type": "object",
+    "description": "记忆桥接",
+    "hint": "只读使用关联记忆插件提供的用户画像与回忆，让主动消息更贴合对方；未安装时自动忽略。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用记忆桥接",
+        "hint": "需要安装记忆插件；未安装时自动忽略，不影响其它功能。",
+        "default": true
+      },
+      "plugin_name": {
+        "type": "string",
+        "description": "记忆插件名称",
+        "hint": "默认即可，除非你使用了改名的记忆插件。",
+        "default": "astrbot_plugin_tmemory"
+      },
+      "timeout_sec": {
+        "type": "float",
+        "description": "读取等待上限（秒）",
+        "hint": "超过该时间自动跳过记忆读取。",
+        "default": 2.0
+      },
+      "limit": {
+        "type": "int",
+        "description": "每次读取条数",
+        "hint": "默认 4 条。",
+        "default": 4
+      },
+      "ttl_min": {
+        "type": "int",
+        "description": "缓存时间（分钟）",
+        "hint": "该时间内不重复读取记忆。",
+        "default": 5
+      }
+    }
   }
 }

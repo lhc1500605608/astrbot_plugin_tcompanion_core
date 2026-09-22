@@ -22,6 +22,7 @@ from .emotion import (
     expression_for,
 )
 from .life_state import WeeklySchedule, generate_life_state
+from .memory_bridge import MEMORY_WARMTH_MAX_DELTA, MEMORY_WARMTH_STEP
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
     OPEN_THREAD_KINDS,
@@ -35,6 +36,7 @@ from .motivation import (
     relationship_mode,
     sanitize_thread_title,
     thread_id_for,
+    time_window,
 )
 from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
 from .store import Store
@@ -43,7 +45,7 @@ from .store import Store
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -104,11 +106,13 @@ class ContractV1:
         schedule: WeeklySchedule | None = None,
         clock: Callable[[], datetime] | None = None,
         config=None,
+        memory_bridge=None,
     ) -> None:
         self._store = store
         self._schedule = schedule
         self._clock = clock or _utcnow
         self._config = config
+        self._memory_bridge = memory_bridge
 
     # -- info --------------------------------------------------------------
     async def get_contract_info(self) -> dict:
@@ -135,6 +139,8 @@ class ContractV1:
                 "expression": True,
                 # additive v1.2 key (Phase 2-B); the map shape stays dict[str, bool]
                 "open_threads_followup": True,
+                # additive v1.3 key (Phase 2-E); the map shape stays dict[str, bool]
+                "memory_bridge": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -220,7 +226,8 @@ class ContractV1:
         ``unanswered_streak`` (plus the v1 echo fields ``umo`` / ``persona_id``
         / ``degraded``). v1.1 adds the optional keys ``emotion_state`` and
         ``expression``; v1.2 adds the optional ``open_thread_details`` list
-        (older clients ignore unknown keys).
+        (older clients ignore unknown keys) and v1.3 the optional ``memory``
+        payload (``snippets`` + ``profile``; group scopes get ``snippets`` only).
         """
         moment = self._clock()
         degraded = False
@@ -372,6 +379,17 @@ class ContractV1:
             except Exception:
                 degraded = True
 
+        # optional memory bridge payload (v1.3; group scopes get snippets only)
+        memory = await self._memory_payload(
+            umo,
+            is_group=is_group,
+            moment=moment,
+            life_state=life_state,
+            stage=stage,
+            open_threads=open_threads,
+        )
+        memory_hints = self._memory_hints(memory)
+
         # motivation fusion (deterministic; never writes)
         try:
             motivation = fuse_motivation(
@@ -386,6 +404,7 @@ class ContractV1:
                 open_thread_details=tuple(open_thread_details),
                 allow=bool(quota.get("allow")),
                 emotion_state=emotion_name,
+                memory_hints=memory_hints,
             ).to_dict()
         except Exception:
             motivation = {
@@ -400,7 +419,7 @@ class ContractV1:
         if not life_state_ok or bool((life_state or {}).get("degraded")):
             degraded = True
 
-        return {
+        result = {
             "api_version": self.api_version,
             "umo": umo,
             "persona_id": resolved_persona,
@@ -416,6 +435,11 @@ class ContractV1:
             "expression": expression,
             "degraded": degraded,
         }
+        # Optional v1.3 key: present only when the memory bridge returned data
+        # (absent for no bridge / plugin missing / timeout / error / no memory).
+        if memory is not None:
+            result["memory"] = memory
+        return result
 
     async def on_proactive_outcome(
         self,
@@ -766,7 +790,10 @@ class ContractV1:
 
         Private scopes combine the emotion state, the relationship stage and
         the current life energy; group scopes are hard-suppressed to
-        ``放松``/``活泼``/``温暖`` with ``warmth <= 0.55``.
+        ``放松``/``活泼``/``温暖`` with ``warmth <= 0.55``. When the memory
+        bridge surfaces a user profile the ``style_hints["warmth"]`` is nudged
+        up by at most +0.05 (never above the mode's base + 0.05, never changing
+        ``mode``); without memory the result is unchanged.
         """
         moment = self._clock()
         try:
@@ -802,6 +829,7 @@ class ContractV1:
             unanswered_streak=streak,
             is_group=False,
         )
+        decision = await self._nudge_warmth_with_memory(decision, umo)
         return self._expression_payload(decision)
 
     # -- internals ---------------------------------------------------------
@@ -833,6 +861,107 @@ class ContractV1:
             )
         except Exception:
             pass
+
+    # -- memory bridge (v1.3) ----------------------------------------------
+    def _memory_query(
+        self,
+        moment: datetime,
+        life_state: dict | None,
+        stage: str,
+        open_threads: list[str],
+        is_group: bool,
+    ) -> str:
+        """Derive a short, zero-LLM query for the memory plugin.
+
+        Joins the current life activity/scene, the two freshest open-thread
+        labels and the relationship stage; when all of those are empty it
+        degrades to ``<time window> <session type>``. Always clipped to
+        :data:`memory_bridge.QUERY_MAX_CHARS`.
+        """
+        life = life_state or {}
+        parts = [
+            str(life.get("activity") or ""),
+            str(life.get("scene") or ""),
+            *[str(label) for label in list(open_threads)[:2]],
+            str(stage or ""),
+        ]
+        query = " ".join(part for part in parts if part).strip()
+        if not query:
+            _, window_label = time_window(moment.hour)
+            query = f"{window_label}{'群聊' if is_group else '私聊'}"
+        return query[:100]
+
+    async def _memory_payload(
+        self,
+        umo: str,
+        *,
+        is_group: bool,
+        moment: datetime,
+        life_state: dict | None,
+        stage: str,
+        open_threads: list[str],
+    ) -> dict | None:
+        """Read the optional memory payload; ``None`` on any failure.
+
+        Fail-closed: no bridge, plugin missing, timeout, error or simply no
+        memory data all return ``None``, so ``get_proactive_context`` emits no
+        ``memory`` key and stays byte-identical to v1.2.0.
+        """
+        bridge = self._memory_bridge
+        if bridge is None:
+            return None
+        try:
+            query = self._memory_query(moment, life_state, stage, open_threads, is_group)
+            payload = await bridge.fetch(
+                umo,
+                query=query,
+                session_type="group" if is_group else "private",
+            )
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or not payload:
+            return None
+        return payload
+
+    @staticmethod
+    def _memory_hints(memory: dict | None) -> tuple[str, ...]:
+        """Derive label-matching hints (profile facets + highlights) for fusion."""
+        if not isinstance(memory, dict):
+            return ()
+        profile = memory.get("profile")
+        if not isinstance(profile, dict):
+            return ()
+        hints: list[str] = []
+        facets = profile.get("facets")
+        if isinstance(facets, dict):
+            hints.extend(str(key) for key in facets if str(key or "").strip())
+        highlights = profile.get("highlights")
+        if isinstance(highlights, (list, tuple)):
+            hints.extend(str(item) for item in highlights if str(item or "").strip())
+        return tuple(hints)
+
+    async def _nudge_warmth_with_memory(self, decision: dict, umo: str) -> dict:
+        """Raise ``style_hints.warmth`` by at most +0.05 when a profile exists.
+
+        Never changes ``mode`` and never lowers warmth; without a profile the
+        ``decision`` is returned untouched (private scopes only).
+        """
+        bridge = self._memory_bridge
+        if bridge is None:
+            return decision
+        try:
+            payload = await bridge.fetch(umo, query="", session_type="private")
+        except Exception:
+            return decision
+        if not isinstance(payload, dict) or not payload.get("profile"):
+            return decision
+        hints = dict(decision.get("style_hints") or {})
+        try:
+            base = float(hints.get("warmth") or 0.0)
+        except (TypeError, ValueError):
+            base = 0.0
+        hints["warmth"] = round(min(base + MEMORY_WARMTH_MAX_DELTA, base + MEMORY_WARMTH_STEP), 4)
+        return {**decision, "style_hints": hints}
 
     def _resolve_persona(self, user_id: str) -> str:
         """Resolve the persona owning ``user_id`` (falls back to default)."""

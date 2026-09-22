@@ -161,6 +161,34 @@ def clamp01(value: float) -> float:
     return round(min(1.0, max(0.0, float(value))), 4)
 
 
+#: Ranking-only bonus when a candidate label overlaps a memory hint (v1.3).
+MEMORY_HINT_BONUS = 0.05
+
+
+def _memory_hint_bonus(label: str, hint_norms: tuple[str, ...], *, ngram: int = 2) -> float:
+    """Return :data:`MEMORY_HINT_BONUS` when ``label`` overlaps any hint.
+
+    Zero-LLM substring overlap: the candidate label matches if it contains a
+    hint outright or shares any ``ngram``-character substring of a hint (a
+    CJK-friendly signal, e.g. both mention 「论文」). Ranking only: the caller's
+    gates (``allow`` / ``adopted`` / ``blocked_reason`` / lifecycle) are never
+    affected by this value.
+    """
+    if not hint_norms:
+        return 0.0
+    norm_label = " ".join(str(label or "").split()).lower()
+    if not norm_label:
+        return 0.0
+    for hint in hint_norms:
+        if len(hint) < ngram:
+            continue
+        if hint in norm_label:
+            return MEMORY_HINT_BONUS
+        if any(hint[index : index + ngram] in norm_label for index in range(len(hint) - ngram + 1)):
+            return MEMORY_HINT_BONUS
+    return 0.0
+
+
 def sanitize_thread_title(title: str, *, max_len: int = THREAD_TITLE_MAX) -> str:
     """Reduce arbitrary text to a short, single-line open-thread label.
 
@@ -286,6 +314,7 @@ def fuse_motivation(
     open_thread_details: Sequence[dict] = (),
     allow: bool = True,
     emotion_state: str = "",
+    memory_hints: Sequence[str] = (),
 ) -> MotivationResult:
     """Fuse life event + open threads + time window into a scored candidate set.
 
@@ -307,10 +336,20 @@ def fuse_motivation(
 
     ``emotion_state`` may only *dampen* the scores (``回避``/``受伤``, see
     ``emotion.DAMPING_STATES``) — a positive emotion never boosts outreach.
+
+    ``memory_hints`` (additive v1.3) are profile-derived strings used purely as
+    a **ranking** signal: a candidate whose label overlaps any hint gains at
+    most :data:`MEMORY_HINT_BONUS`. Gates, lifecycle and ``adopted`` are
+    unaffected (see ``docs/CONTRACT.md`` §14).
     """
     index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 0
     stage_bonus = STAGE_BONUS_STEP * index
     decay = ignored_decay_factor(unanswered_streak) * DAMPING_STATES.get(emotion_state, 1.0)
+    hint_norms = tuple(
+        norm
+        for norm in (" ".join(str(hint or "").split()).lower() for hint in memory_hints or ())
+        if len(norm) >= 2
+    )
     candidates: list[MotivationCandidate] = []
 
     pairs: list[tuple[str, str | None]] = []
@@ -329,7 +368,10 @@ def fuse_motivation(
                 key=f"open_thread:{position}",
                 label=label,
                 reason=OPEN_THREAD_REASON,
-                score=clamp01((OPEN_THREAD_BASE + recency + stage_bonus) * decay),
+                score=clamp01(
+                    (OPEN_THREAD_BASE + recency + stage_bonus) * decay
+                    + _memory_hint_bonus(label, hint_norms)
+                ),
                 thread_id=thread_id,
             )
         )
@@ -345,7 +387,10 @@ def fuse_motivation(
                 key="life_event",
                 label=activity,
                 reason=reason,
-                score=clamp01((LIFE_EVENT_BASE + energy_bonus + stage_bonus) * decay),
+                score=clamp01(
+                    (LIFE_EVENT_BASE + energy_bonus + stage_bonus) * decay
+                    + _memory_hint_bonus(activity, hint_norms)
+                ),
             )
         )
 
@@ -355,7 +400,10 @@ def fuse_motivation(
             key=f"time:{window_key}",
             label=window_label,
             reason=f"现在是{window_label}，{_TIME_WINDOW_HINTS[window_key]}",
-            score=clamp01((TIME_WINDOW_BASE + stage_bonus) * decay),
+            score=clamp01(
+                (TIME_WINDOW_BASE + stage_bonus) * decay
+                + _memory_hint_bonus(window_label, hint_norms)
+            ),
         )
     )
 

@@ -9,6 +9,7 @@ from astrbot.api.web import json_response
 
 from .core.contract import PLUGIN_NAME, PLUGIN_VERSION, ContractV1
 from .core.emotion import VALENCE_WINDOW_HOURS, emotion_snapshot, expression_for
+from .core.memory_bridge import MemoryBridge
 from .core.paths import get_db_path
 from .core.relationship import STAGE_STRANGER
 from .core.store import Store
@@ -33,6 +34,7 @@ class TCompanionCore(Star):
         self.config = config or {}
         self._store: Store | None = None
         self.contract: ContractV1 | None = None
+        self._memory_bridge: MemoryBridge | None = None
         context.register_web_api(
             f"/{PLUGIN_NAME}/life-state",
             self.api_life_state,
@@ -61,7 +63,11 @@ class TCompanionCore(Star):
     async def initialize(self):
         db_path = get_db_path()
         self._store = Store.open(db_path)
-        self.contract = ContractV1(self._store, config=self.config)
+        # Optional read-only bridge to the memory plugin (fail-closed when absent).
+        self._memory_bridge = MemoryBridge(context=self.context, config=self.config)
+        self.contract = ContractV1(
+            self._store, config=self.config, memory_bridge=self._memory_bridge
+        )
         logger.info(
             "[tcompanion_core] initialized: contract v%s schema v%s db=%s",
             self.contract.api_version,
@@ -247,4 +253,5 @@ class TCompanionCore(Star):
             self._store.close()
             self._store = None
             self.contract = None
+            self._memory_bridge = None
             logger.info("[tcompanion_core] terminated.")

@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.2 修订）
+# TCompanion Core — 冻结契约 v1（v1.3 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.2 为纯向后兼容增量**，见 §11/§12/§13）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.2.0`）
+- 契约版本：`api_version = 1`（**v1.3 为纯向后兼容增量**，见 §11/§12/§13/§14）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.3.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -23,6 +23,15 @@
 > 4. schema 升级到 `5`（`open_threads` 生命周期加列，纯增量、回填、不改旧行）；
 > 5. `get_contract_info()` 追加**可选**键 `open_thread`（生效配置回显）；生命周期
 >    由两条读取路径幂等驱动，支持 `open_thread.enabled=false` 整体关闭（§13.3）。
+>
+> v1.3 变更摘要（不破坏任何 v1.x 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `memory_bridge`；
+> 2. `get_proactive_context` 追加**可选**键 `memory`（只读消费关联记忆插件的
+>    公共召回/画像 API；不可用时该键**整体缺省**，输出与 v1.2.0 逐字节一致）；
+> 3. `expression_decision` 在读到画像时仅把 `style_hints["warmth"]` 上调 ≤ +0.05
+>    （`mode` 不变；群聊/无记忆不变）；
+> 4. `fuse_motivation` 追加可选入参 `memory_hints`（仅影响候选**排序**，门控/生命周期不变）；
+> 5. 无新表、无 schema 变更，`schema_version` 仍为 `5`。
 
 ## 1. 通用约定
 
@@ -51,14 +60,16 @@
 | `plugin` | `str` | 否 | 固定 `astrbot_plugin_tcompanion_core` |
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
-| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` |
+| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` / `memory_bridge` |
 | `open_thread` | `dict` | 否（v1.2 新增） | 生效后的未完话题配置（默认值已补齐）：`{enabled, max_open, ttl_days, expire_days, followup_max}` |
 
 `capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
 数组属于破坏性变更，见 §8）。取值：`life_state/schedule/relationship/motivation/
 open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送/调度，
 只提供输入与回执）；v1.1 追加 `emotion=true` / `expression=true`；v1.2 追加
-`open_threads_followup=true`（下游据此决定是否走未完话题续接链路）。
+`open_threads_followup=true`（下游据此决定是否走未完话题续接链路）；v1.3 追加
+`memory_bridge=true`（装配了可选的只读记忆桥，见 §14；该位表示**能力存在**，
+不表示关联记忆插件已安装——实际可用性由运行时降级决定）。
 
 ## 3. `get_life_state(persona_id) -> dict | None`
 
@@ -117,6 +128,7 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 | `unanswered_streak` | `int` | 是 | 连续未回应的主动消息数；缺省 `0` |
 | `emotion_state` | `dict \| None` | 否（v1.1 新增） | `{state, valence, last_event, as_of}`（§11.3）；群聊恒 `None` |
 | `expression` | `dict \| None` | 否（v1.1 新增） | `{mode, style_hints, reason}`（§12）；群聊为抑制后的安全档 |
+| `memory` | `dict` | 否（v1.3 新增） | 记忆桥只读载荷（§14.2）；桥不可用/无数据时**整键缺省**；群聊只含 `snippets` |
 | `degraded` | `bool` | 是 | 存储异常 / `life_state` 缺失或降级时为 `true` |
 
 > `emotion_state` / `expression` 是 v1.1 的**可选追加键**：老客户端（kanjyou
@@ -515,3 +527,80 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 `unanswered_streak < 3`、`expression.proactive_bias ≥ 0` 等闸门。发送成功后调用
 `mark_thread_followup` 递增计数。core 缺失 / `api_version≠1` / 无
 `open_threads_followup` capability → 下游完全不调用（= 现状，零回归）。
+
+## 14. 记忆桥（v1.3 · Phase 2-E）
+
+实现：`core/memory_bridge.py`（桥 + 配置解析）+ `core/contract.py`（三个消费点）。
+**无新表、无 schema 变更**（`schema_version` 仍为 `5`），`api_version` 仍为 `1`。
+
+### 14.1 只读桥（`MemoryBridge`）
+
+- 经 `context.get_registered_star(plugin_name)` 解析关联记忆插件；`activated=False`
+  或缺省即视为不可用。`plugin_name` 默认 `astrbot_plugin_tmemory`（可配置）。
+- 只调用两个**公共只读** API：`recall_for_prompt(umo, query, session_type, limit)`
+  与 `get_profile_for_prompt(umo, query, limit, session_type)`（后者用 `hasattr`
+  探测，缺失即只给 `snippets`）。
+- 每次调用用 `asyncio.wait_for` 包裹，超时 `memory_bridge_timeout_sec`（默认 2s，
+  硬上限 10s）；结果按 `umo|会话类型|query` 做 TTL 缓存（默认 5 分钟），
+  缓存内不重复查库（命中/空结果都会缓存）。
+- **fail-closed**：插件缺失 / `enabled=false` / 超时 / 任意异常 / 无数据 → 返回
+  `None`，调用方**完全等同 v1.2.0**。桥自身绝不抛异常、绝不写库。
+- 可观测计数（只记结果、不落内容）：`hit` / `degrade` / `timeout`
+  （`MemoryBridge.stats()`；超时同时计入 `timeout` 与 `degrade`）。
+- 隐私：只透传关联插件**已裁剪**的短文本（snippet ≤200 字、highlight ≤120 字、
+  summary ≤200 字），不落消息原文；**群聊不读取也不返回 `profile`**。
+
+### 14.2 `memory` 载荷（`get_proactive_context` 可选键）
+
+```json
+"memory": {
+  "snippets": ["<≤200字>", "..."],              // ≤ memory_bridge_limit（默认 4）
+  "profile": {                                   // 群聊整体缺省
+    "facets": {"preference": 2, "task_pattern": 1},
+    "summary": "<≤200字>",
+    "highlights": ["<≤120字>", "..."]
+  },
+  "as_of": "<ISO8601>"
+}
+```
+
+- 无数据 / 桥不可用 → 整个 `memory` 键**缺省**（不是空对象），输出与 v1.2.0
+  逐字节一致（除 `plugin_version`）。
+- 查询串为零 LLM 派生：`life.activity` + `life.scene` + 最新两条未完话题标签 +
+  关系阶段，截断 ≤100 字；全空时退化为「时段 + 会话类型」。
+- 画像缺失（老版记忆插件）时仍可只给 `snippets`。
+
+### 14.3 表达微调（`expression_decision`）
+
+- 私聊且读到画像时：`style_hints["warmth"] += 0.03`，**硬上限 = 该档基准 + 0.05**
+  （`MEMORY_WARMTH_MAX_DELTA`），**永不改变 `mode`**、只升不降。
+- 无记忆 / 群聊 / 异常 → 与 v1.2.0 完全一致。
+
+### 14.4 排序微调（`fuse_motivation(memory_hints=...)`）
+
+- 新增可选入参 `memory_hints: Sequence[str] = ()`，由契约从画像 `facets` 键与
+  `highlights` 派生。候选 `label` 归一化后命中任一 hint 的 ≥2 字子串 →
+  `score += 0.05`（`MEMORY_HINT_BONUS`，上界，`clamp01`），**仅在排序前生效**。
+- **门控与生命周期不变**：`allow` / `adopted` / `blocked_reason` /
+  `unanswered_streak` 判定不受影响，只改候选排序。
+
+### 14.5 配置（`memory_bridge` 组，面向用户）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | 启用记忆桥接（未装记忆插件时自动忽略） |
+| `plugin_name` | `string` | `astrbot_plugin_tmemory` | 记忆插件名称 |
+| `timeout_sec` | `float` | `2.0` | 读取等待上限（秒），超时自动跳过 |
+| `limit` | `int` | `4` | 每次读取条数 |
+| `ttl_min` | `int` | `5` | 缓存时间（分钟） |
+
+- 配置对象每次读取时重新解析（热更新即时生效）；缺省/异常回退到上表默认值。
+- 为兼容写作习惯，扁平键 `memory_bridge_enabled` / `memory_bridge_plugin_name` /
+  `memory_bridge_timeout_sec` / `memory_bridge_limit` / `memory_bridge_ttl_min`
+  同样被接受（组存在时以组为准）。
+
+### 14.6 边界（本阶段不做）
+
+- 不反向写入关联记忆插件；不生成/蒸馏画像。
+- 不引入新的 LLM 调用（纯读 + 轻量规则）。
+- 不改关联插件自身的召回注入逻辑。

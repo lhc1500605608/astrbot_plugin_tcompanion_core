@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-09-22
+
+### Added
+- **Optional memory bridge (Phase 2-E)**: `core/memory_bridge.py::MemoryBridge`
+  resolves a memory plugin through the star registry (activated check) and calls
+  its public read-only APIs (`recall_for_prompt`, plus `get_profile_for_prompt`
+  probed with `hasattr`). Each call is wrapped in `asyncio.wait_for` (default 2s)
+  and results are cached per scope for a short TTL. Fail-closed: a missing
+  plugin / disabled switch / timeout / error / no data all return `None`, so the
+  output stays byte-identical to v1.2.0. Read-only, no raw text, counters only
+  (`hit`/`degrade`/`timeout`).
+- **`get_proactive_context` additive key `memory`**: optional
+  `{snippets, profile{facets,summary,highlights}, as_of}`; absent entirely when
+  the bridge is unavailable or has no data. Group scopes receive `snippets`
+  only — the profile is never fetched or returned for a group.
+- **`expression_decision` memory nudge**: with a profile (private scope) the
+  `style_hints["warmth"]` rises by at most +0.05 (base + `MEMORY_WARMTH_MAX_DELTA`),
+  never changing `mode`; groups and memory-less scopes are unchanged.
+- **`fuse_motivation(memory_hints=...)`**: an additive, ranking-only signal — a
+  candidate whose label overlaps a profile-derived hint gains at most +0.05;
+  gates (`allow`/`adopted`/`blocked_reason`) and lifecycle are untouched.
+- **`get_contract_info().capabilities`** gains `memory_bridge: true` (map shape
+  stays `dict[str, bool]`).
+- **Config group** `memory_bridge` (`enabled`/`plugin_name`/`timeout_sec`/
+  `limit`/`ttl_min`); flat `memory_bridge_*` keys are accepted too.
+- `docs/CONTRACT.md` §14.
+
+### Notes
+- `api_version` stays `1`; no schema change (`schema_version` stays `5`).
+- Read-only bridge: companion-core never writes to the memory plugin, and never
+  relays or stores message bodies. No new LLM calls.
+
 ## [1.2.0] - 2026-09-21
 
 ### Added

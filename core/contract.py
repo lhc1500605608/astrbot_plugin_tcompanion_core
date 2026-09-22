@@ -18,8 +18,20 @@ from .emotion import (
     STATE_CALM,
     VALENCE_WINDOW_HOURS,
     emotion_snapshot,
+    emotion_state,
     event_delta,
     expression_for,
+)
+from .life_line import (
+    QUIET_INTERACTION_GRACE_MIN,
+    SLEEP_INFER_DAYS,
+    LifeLineConfig,
+    format_minutes,
+    in_window,
+    infer_sleep_window,
+    meal_view,
+    parse_life_line_config,
+    synthesize_diary,
 )
 from .life_state import WeeklySchedule, generate_life_state
 from .memory_bridge import MEMORY_WARMTH_MAX_DELTA, MEMORY_WARMTH_STEP
@@ -40,12 +52,13 @@ from .motivation import (
 )
 from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
 from .store import Store
+from .weather import WeatherClient
 
 #: Frozen contract version. Bump only with a new ``docs/CONTRACT.md`` revision.
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -53,6 +66,19 @@ DEFAULT_PERSONA_ID = "default"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso(value) -> datetime | None:
+    """Parse an ISO timestamp to an aware datetime (``None`` when invalid)."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -107,12 +133,18 @@ class ContractV1:
         clock: Callable[[], datetime] | None = None,
         config=None,
         memory_bridge=None,
+        weather_client=None,
     ) -> None:
         self._store = store
         self._schedule = schedule
         self._clock = clock or _utcnow
         self._config = config
         self._memory_bridge = memory_bridge
+        # v1.4 life line: an injected client (tests/stub) wins; otherwise one is
+        # built lazily from the config and re-built when its signature changes.
+        self._injected_weather = weather_client
+        self._weather_client = weather_client
+        self._weather_key: tuple | None = None
 
     # -- info --------------------------------------------------------------
     async def get_contract_info(self) -> dict:
@@ -141,6 +173,8 @@ class ContractV1:
                 "open_threads_followup": True,
                 # additive v1.3 key (Phase 2-E); the map shape stays dict[str, bool]
                 "memory_bridge": True,
+                # additive v1.4 key (Phase 2-D); the map shape stays dict[str, bool]
+                "life_line": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -219,8 +253,11 @@ class ContractV1:
     async def get_proactive_context(self, umo: str, persona_id: str | None = None) -> dict:
         """Aggregate payload for downstream consumers (frozen v1, T3).
 
-        Pure read: no mutation of state. Every field is resolved independently
-        and falls back per-field, so one failing domain never blanks the rest.
+        Pure read of *business* state. Every field is resolved independently and
+        falls back per-field, so one failing domain never blanks the rest. The
+        only writes are the idempotent read-path maintenance passes (open-thread
+        lifecycle; v1.4 sleep-window/meal-event/diary synthesis), because core
+        owns no scheduler.
         Returns ``api_version`` / ``life_state`` / ``relationship`` /
         ``expression_hints`` / ``motivation`` / ``open_threads`` / ``quota`` /
         ``unanswered_streak`` (plus the v1 echo fields ``umo`` / ``persona_id``
@@ -228,6 +265,10 @@ class ContractV1:
         ``expression``; v1.2 adds the optional ``open_thread_details`` list
         (older clients ignore unknown keys) and v1.3 the optional ``memory``
         payload (``snippets`` + ``profile``; group scopes get ``snippets`` only).
+        v1.4 adds the optional ``life_detail`` (weather/meal/sleep/quiet/diary)
+        for private scopes — absent when the section is disabled or isolated —
+        and may report ``quota.allow=false`` +
+        ``motivation.blocked_reason="quiet_hours"`` during quiet hours.
         """
         moment = self._clock()
         degraded = False
@@ -379,6 +420,22 @@ class ContractV1:
             except Exception:
                 degraded = True
 
+        # life line (v1.4; private scopes only — group scopes get nothing)
+        cfg = self._life_line_config()
+        life_detail: dict | None = None
+        quiet = False
+        if cfg.enabled and not is_group:
+            try:
+                life_detail = await self._life_detail(scope_persona, user_id, moment, cfg)
+                quiet = bool(life_detail.get("quiet"))
+            except Exception:
+                life_detail = None
+                quiet = False
+            if quiet:
+                # Quiet hours hard-suppress autonomous outreach (D3): the quota
+                # is reported exhausted and the motivation is blocked.
+                quota = {**quota, "allow": False}
+
         # optional memory bridge payload (v1.3; group scopes get snippets only)
         memory = await self._memory_payload(
             umo,
@@ -405,6 +462,7 @@ class ContractV1:
                 allow=bool(quota.get("allow")),
                 emotion_state=emotion_name,
                 memory_hints=memory_hints,
+                quiet=quiet,
             ).to_dict()
         except Exception:
             motivation = {
@@ -435,6 +493,10 @@ class ContractV1:
             "expression": expression,
             "degraded": degraded,
         }
+        # Optional v1.4 key: present only for an enabled private life line
+        # (absent when disabled, for group scopes, or on failure).
+        if life_detail is not None:
+            result["life_detail"] = life_detail
         # Optional v1.3 key: present only when the memory bridge returned data
         # (absent for no bridge / plugin missing / timeout / error / no memory).
         if memory is not None:
@@ -832,6 +894,77 @@ class ContractV1:
         decision = await self._nudge_warmth_with_memory(decision, umo)
         return self._expression_payload(decision)
 
+    # -- life line (v1.4) --------------------------------------------------
+    async def get_life_line(self, umo: str, day: str | None = None) -> dict:
+        """Return the structured life-line snapshot for ``umo`` on ``day``.
+
+        Private scopes only: group scopes return an ``isolated`` empty snapshot
+        (no weather/meal/sleep/diary), and a disabled ``life_line`` section
+        returns the neutral default. Every dimension fails closed independently.
+        """
+        moment = self._clock()
+        target_day = day or moment.date().isoformat()
+        base = {
+            "api_version": self.api_version,
+            "umo": umo,
+            "persona_id": None,
+            "day": target_day,
+            "weather": None,
+            "meal": None,
+            "sleep": None,
+            "quiet": False,
+            "diary": None,
+            "isolated": False,
+            "degraded": False,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "degraded": True}
+        if key.is_group:
+            return {**base, "isolated": True, "persona_id": None}
+        cfg = self._life_line_config()
+        if not cfg.enabled:
+            return base
+        resolved = self._resolve_persona(key.user_id)
+        try:
+            detail = await self._life_detail(resolved, key.user_id, moment, cfg, day=target_day)
+        except Exception:
+            return {**base, "persona_id": resolved, "degraded": True}
+        return {
+            **base,
+            "persona_id": resolved,
+            "weather": detail.get("weather"),
+            "meal": detail.get("meal"),
+            "sleep": detail.get("sleep"),
+            "quiet": bool(detail.get("quiet")),
+            "diary": detail.get("diary"),
+        }
+
+    async def get_diary(self, umo: str, day: str | None = None) -> dict | None:
+        """Return the synthesized diary for ``umo`` on ``day`` (``None`` if any).
+
+        Groups and a disabled section return ``None``. The row is synthesized
+        once, deterministically and without an LLM, from that day's structured
+        life line — never from raw message text.
+        """
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return None
+        if key.is_group:
+            return None
+        cfg = self._life_line_config()
+        if not cfg.enabled:
+            return None
+        moment = self._clock()
+        target_day = day or moment.date().isoformat()
+        resolved = self._resolve_persona(key.user_id)
+        try:
+            return self._ensure_diary(resolved, key.user_id, target_day, cfg)
+        except Exception:
+            return None
+
     # -- internals ---------------------------------------------------------
     def _open_thread_config(self) -> OpenThreadConfig:
         """Parse the ``open_thread`` group; defaults on any failure.
@@ -861,6 +994,226 @@ class ContractV1:
             )
         except Exception:
             pass
+
+    # -- life line internals (v1.4) ----------------------------------------
+    def _life_line_config(self) -> LifeLineConfig:
+        """Parse the ``life_line`` group; defaults on any failure.
+
+        Re-parsed on every call so AstrBot hot-reload is honoured immediately.
+        """
+        try:
+            return parse_life_line_config(self._config)
+        except Exception:
+            return LifeLineConfig()
+
+    def _weather_for(self, cfg: LifeLineConfig):
+        """Return the effective weather client (injected wins, else lazy)."""
+        if self._injected_weather is not None:
+            return self._injected_weather
+        key = (cfg.weather_api_base, cfg.weather_timeout_sec, cfg.weather_ttl_min)
+        if self._weather_client is None or self._weather_key != key:
+            self._weather_client = WeatherClient(
+                api_base=cfg.weather_api_base,
+                timeout=cfg.weather_timeout_sec,
+                ttl_minutes=cfg.weather_ttl_min,
+            )
+            self._weather_key = key
+        return self._weather_client
+
+    async def _life_detail(
+        self, persona_id: str, user_id: str, moment: datetime, cfg: LifeLineConfig, *, day=None
+    ) -> dict:
+        """Assemble the private life detail (weather/meal/sleep/quiet/diary)."""
+        target_day = day or moment.date().isoformat()
+        minute = moment.hour * 60 + moment.minute
+        detail: dict = {
+            "weather": None,
+            "meal": None,
+            "sleep": None,
+            "quiet": False,
+            "diary": None,
+        }
+
+        if cfg.city:
+            try:
+                detail["weather"] = await self._weather_for(cfg).get(cfg.city)
+            except Exception:
+                detail["weather"] = None
+
+        if cfg.meal_reminders_enabled:
+            meal = meal_view(minute, cfg.meal_windows())
+            detail["meal"] = meal
+            if meal and meal.get("in_window"):
+                try:
+                    self._store.insert_life_event(
+                        persona_id,
+                        user_id,
+                        kind="meal",
+                        dedupe_key=f"meal:{meal['slot']}:{target_day}",
+                        payload={"slot": meal["slot"], "day": target_day},
+                        ts=moment,
+                    )
+                except Exception:
+                    pass
+
+        sleep_view = self._resolve_sleep_window(persona_id, user_id, target_day, moment, cfg)
+        detail["sleep"] = sleep_view
+        detail["quiet"] = self._quiet_now(cfg, sleep_view, moment, persona_id, user_id)
+        try:
+            detail["diary"] = self._previous_diary(persona_id, user_id, target_day, cfg)
+        except Exception:
+            detail["diary"] = None
+        return detail
+
+    def _resolve_sleep_window(
+        self,
+        persona_id: str,
+        user_id: str,
+        day: str,
+        moment: datetime,
+        cfg: LifeLineConfig,
+    ) -> dict | None:
+        """Return ``{window,since,source}`` for the day (auto) or ``None``."""
+        if not cfg.sleep_window_auto:
+            return None
+        try:
+            row = self._store.get_sleep_window(persona_id, user_id, day)
+        except Exception:
+            row = None
+        if row is None:
+            since = (moment - timedelta(days=SLEEP_INFER_DAYS)).isoformat()
+            try:
+                stamps = self._store.list_activity_timestamps(
+                    persona_id, user_id, since_iso=since
+                )
+            except Exception:
+                stamps = []
+            start, end, source = infer_sleep_window(stamps)
+            try:
+                row = self._store.upsert_sleep_window(
+                    persona_id, user_id, day, start_min=start, end_min=end, source=source
+                )
+            except Exception:
+                row = {"start_min": start, "end_min": end, "source": source}
+        if not row:
+            return None
+        start_min = int(row.get("start_min") or 0)
+        end_min = int(row.get("end_min") or 0)
+        minute = moment.hour * 60 + moment.minute
+        inside = day == moment.date().isoformat() and in_window(
+            minute, (start_min, end_min)
+        )
+        return {
+            "window": f"{format_minutes(start_min)}-{format_minutes(end_min)}",
+            "since": format_minutes(start_min) if inside else "",
+            "source": str(row.get("source") or "default"),
+            "start_min": start_min,
+            "end_min": end_min,
+        }
+
+    def _quiet_now(
+        self,
+        cfg: LifeLineConfig,
+        sleep_view: dict | None,
+        moment: datetime,
+        persona_id: str,
+        user_id: str,
+    ) -> bool:
+        """Effective quiet-hours flag for a private scope (D3).
+
+        Uses the inferred sleep window when ``sleep_window_auto`` is on, else the
+        configured ``quiet_hours``. ``proactive_opt_in`` or a user interaction in
+        the last :data:`QUIET_INTERACTION_GRACE_MIN` minutes exempts suppression.
+        """
+        if cfg.sleep_window_auto and sleep_view is not None:
+            window = (sleep_view["start_min"], sleep_view["end_min"])
+        else:
+            window = cfg.quiet_window()
+        if window is None:
+            return False
+        minute = moment.hour * 60 + moment.minute
+        if not in_window(minute, window):
+            return False
+        if cfg.proactive_opt_in:
+            return False
+        try:
+            last = self._store.get_interaction_dynamics(persona_id, user_id).last_interaction_at
+        except Exception:
+            last = None
+        parsed = _parse_iso(last)
+        if parsed is not None:
+            gap = (moment - parsed).total_seconds()
+            if 0 <= gap <= QUIET_INTERACTION_GRACE_MIN * 60:
+                return False
+        return True
+
+    def _previous_diary(
+        self, persona_id: str, user_id: str, day: str, cfg: LifeLineConfig
+    ) -> dict | None:
+        """Ensure and return the diary for the day before ``day``."""
+        try:
+            base = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+        except ValueError:
+            return None
+        previous = (base - timedelta(days=1)).date().isoformat()
+        return self._ensure_diary(persona_id, user_id, previous, cfg)
+
+    def _ensure_diary(
+        self, persona_id: str, user_id: str, day: str, cfg: LifeLineConfig
+    ) -> dict | None:
+        """Deterministically synthesize ``day``'s diary once (``INSERT OR IGNORE``)."""
+        try:
+            row = self._store.get_diary(persona_id, user_id, day)
+        except Exception:
+            return None
+        if row is not None:
+            return row
+        try:
+            base = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+        except ValueError:
+            return None
+        until = (base + timedelta(days=1)).isoformat()
+        sleep_window = None
+        try:
+            sleep_row = self._store.get_sleep_window(persona_id, user_id, day)
+            if sleep_row is not None:
+                sleep_window = (int(sleep_row["start_min"]), int(sleep_row["end_min"]))
+        except Exception:
+            sleep_window = None
+        meals: set[str] = set()
+        try:
+            for event in self._store.list_life_events(persona_id, user_id, day=day, kind="meal"):
+                parts = str(event.get("dedupe_key") or "").split(":")
+                if len(parts) >= 2 and parts[1]:
+                    meals.add(parts[1])
+        except Exception:
+            meals = set()
+        try:
+            life = self._store.get_life_state(persona_id, day) or {}
+        except Exception:
+            life = {}
+        activity = str(life.get("activity") or "")
+        try:
+            events = self._store.list_emotion_events(
+                persona_id, user_id, since_iso=f"{day}T00:00:00", until_iso=until, limit=200
+            )
+            mood = emotion_state(events, now=base + timedelta(days=1))
+        except Exception:
+            mood = STATE_CALM
+        diary = synthesize_diary(
+            day,
+            sleep_window=sleep_window,
+            meals=sorted(meals),
+            activity=activity,
+            mood=mood,
+        )
+        try:
+            self._store.insert_diary(
+                persona_id, user_id, day, summary=diary["summary"], mood=diary["mood"]
+            )
+            return self._store.get_diary(persona_id, user_id, day)
+        except Exception:
+            return diary
 
     # -- memory bridge (v1.3) ----------------------------------------------
     def _memory_query(

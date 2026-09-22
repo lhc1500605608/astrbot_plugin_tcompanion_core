@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Callable
 
 #: Current target schema version.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: A migration step is either a SQL script or a callable taking the connection
 #: (needed when the DDL must be guarded by a runtime check, e.g. column
@@ -91,6 +91,51 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             ON open_threads (umo, persona_id, status, last_seen_ts);
         CREATE INDEX IF NOT EXISTS idx_open_threads_dedupe
             ON open_threads (umo, persona_id, dedupe_key);
+        """
+    )
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """v6: life-line tables (additive).
+
+    Pure increment: three new tables, created with ``CREATE TABLE IF NOT
+    EXISTS`` and indexed separately, so re-running is a no-op and **no existing
+    table or row is touched**. Old code (v1.3.x) never queries these tables and
+    keeps working unchanged. Only structured fields are stored (time windows,
+    event codes, a synthesized summary) — never raw message text.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sleep_windows (
+            persona_id TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            day        TEXT NOT NULL,
+            start_min  INTEGER NOT NULL,
+            end_min    INTEGER NOT NULL,
+            source     TEXT NOT NULL DEFAULT 'default',
+            PRIMARY KEY (persona_id, user_id, day)
+        );
+
+        CREATE TABLE IF NOT EXISTS life_events (
+            persona_id   TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            ts           TEXT NOT NULL,
+            kind         TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            dedupe_key   TEXT NOT NULL,
+            UNIQUE (persona_id, user_id, dedupe_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_life_events_scope
+            ON life_events (persona_id, user_id, kind, ts);
+
+        CREATE TABLE IF NOT EXISTS life_diary (
+            persona_id TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            day        TEXT NOT NULL,
+            summary    TEXT NOT NULL DEFAULT '',
+            mood       TEXT NOT NULL DEFAULT '',
+            UNIQUE (persona_id, user_id, day)
+        );
         """
     )
 
@@ -260,6 +305,7 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     ),
     (4, _migrate_v4),
     (5, _migrate_v5),
+    (6, _migrate_v6),
 )
 
 #: All tables that must exist after migration, used by tests/health checks.
@@ -274,6 +320,9 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "open_threads",
     "motivation_log",
     "emotion_events",
+    "sleep_windows",
+    "life_events",
+    "life_diary",
 )
 
 

@@ -191,6 +191,12 @@ class TCompanionCore(Star):
     async def expression_decision(self, umo: str, persona_id: str | None = None) -> dict:
         return await self._contract().expression_decision(umo, persona_id)
 
+    async def get_life_line(self, umo: str, day: str | None = None) -> dict:
+        return await self._contract().get_life_line(umo, day=day)
+
+    async def get_diary(self, umo: str, day: str | None = None) -> dict | None:
+        return await self._contract().get_diary(umo, day=day)
+
     # -- Web API handlers (read-only panel) --------------------------------
     async def api_life_state(self):
         if self._store is None:

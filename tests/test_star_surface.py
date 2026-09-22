@@ -35,6 +35,8 @@ CONTRACT_METHODS = frozenset(
         "record_emotion_event",
         "get_emotion_context",
         "expression_decision",
+        "get_life_line",
+        "get_diary",
         "record_open_thread",
         "get_open_threads",
         "close_open_thread",

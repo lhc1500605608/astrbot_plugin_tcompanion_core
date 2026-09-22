@@ -178,5 +178,84 @@
         "default": 5
       }
     }
+  },
+  "life_line": {
+    "type": "object",
+    "description": "生活线",
+    "hint": "让主动消息带上天气、用餐、作息与昨日小结，并在休息时段不打扰。",
+    "items": {
+      "life_line_enabled": {
+        "type": "bool",
+        "description": "启用生活线",
+        "hint": "关闭后不生成天气、用餐、作息与日记信息，行为与旧版本一致。",
+        "default": true
+      },
+      "life_city": {
+        "type": "string",
+        "description": "所在城市",
+        "hint": "填写后用于查询当地天气；留空则不使用天气。",
+        "default": ""
+      },
+      "meal_reminders_enabled": {
+        "type": "bool",
+        "description": "用餐关心",
+        "hint": "在早/午/晚时段到点时关心对方有没有吃饭。",
+        "default": true
+      },
+      "sleep_window_auto": {
+        "type": "bool",
+        "description": "自动推断作息",
+        "hint": "根据近期聊天时间推断入睡与起床；关闭后只用下面的安静时段。",
+        "default": true
+      },
+      "quiet_hours": {
+        "type": "string",
+        "description": "安静时段",
+        "hint": "该时段内不主动打扰；格式 时:分-时:分，默认 23:00-07:30。",
+        "default": "23:00-07:30"
+      },
+      "proactive_opt_in": {
+        "type": "bool",
+        "description": "安静时段也允许主动",
+        "hint": "开启后安静时段仍会主动发消息。",
+        "default": false
+      },
+      "breakfast_window": {
+        "type": "string",
+        "description": "早餐时段",
+        "hint": "格式 时:分-时:分，默认 07:00-09:00。",
+        "default": "07:00-09:00"
+      },
+      "lunch_window": {
+        "type": "string",
+        "description": "午餐时段",
+        "hint": "格式 时:分-时:分，默认 11:30-13:00。",
+        "default": "11:30-13:00"
+      },
+      "dinner_window": {
+        "type": "string",
+        "description": "晚餐时段",
+        "hint": "格式 时:分-时:分，默认 18:00-20:00。",
+        "default": "18:00-20:00"
+      },
+      "weather_api_base": {
+        "type": "string",
+        "description": "天气接口地址（高级）",
+        "hint": "一般留空使用内置数据源；仅自建或测试时填写。",
+        "default": ""
+      },
+      "weather_timeout_sec": {
+        "type": "float",
+        "description": "天气查询超时（秒）",
+        "hint": "默认 3 秒，超时自动跳过。",
+        "default": 3.0
+      },
+      "weather_ttl_min": {
+        "type": "int",
+        "description": "天气缓存时间（分钟）",
+        "hint": "默认 45 分钟，期间不重复查询。",
+        "default": 45
+      }
+    }
   }
 }

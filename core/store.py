@@ -430,6 +430,7 @@ class Store:
         user_id: str,
         *,
         since_iso: str | None = None,
+        until_iso: str | None = None,
         limit: int = 200,
     ) -> list[dict]:
         """Return recent emotion events (derived values only, no message text)."""
@@ -438,6 +439,9 @@ class Store:
         if since_iso:
             sql += " AND ts >= ?"
             params.append(since_iso)
+        if until_iso:
+            sql += " AND ts < ?"
+            params.append(until_iso)
         sql += " ORDER BY ts DESC, dedupe_key DESC LIMIT ?"
         params.append(max(0, int(limit)))
         with self._lock:
@@ -1038,6 +1042,170 @@ class Store:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    # -- life line (v1.4, schema v6) ---------------------------------------
+    def insert_life_event(
+        self,
+        persona_id: str,
+        user_id: str,
+        *,
+        kind: str,
+        dedupe_key: str,
+        payload: dict | None = None,
+        ts: datetime | None = None,
+    ) -> bool:
+        """Record one structured life event; idempotent per ``dedupe_key``.
+
+        ``INSERT OR IGNORE`` on ``UNIQUE(persona_id, user_id, dedupe_key)`` so a
+        repeated read never duplicates an event. Returns ``True`` when a row was
+        inserted. Only derived values are stored (codes, windows) — no raw text.
+        """
+        moment = ts or _utcnow()
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO life_events
+                    (persona_id, user_id, ts, kind, payload_json, dedupe_key)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persona_id,
+                    user_id,
+                    moment.isoformat(),
+                    kind,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    dedupe_key,
+                ),
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    def list_life_events(
+        self,
+        persona_id: str,
+        user_id: str,
+        *,
+        day: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return structured life events for a scope, newest first."""
+        sql = "SELECT * FROM life_events WHERE persona_id = ? AND user_id = ?"
+        params: list = [persona_id, user_id]
+        if day:
+            sql += " AND ts >= ? AND ts < ?"
+            params.extend([f"{day}T00:00:00", f"{day}T23:59:59.999999"])
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY ts DESC, dedupe_key DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_sleep_window(self, persona_id: str, user_id: str, day: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sleep_windows WHERE persona_id = ? AND user_id = ? AND day = ?",
+                (persona_id, user_id, day),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_sleep_window(
+        self,
+        persona_id: str,
+        user_id: str,
+        day: str,
+        *,
+        start_min: int,
+        end_min: int,
+        source: str,
+        overwrite: bool = False,
+    ) -> dict:
+        """Persist a day's inferred/default sleep window.
+
+        Auto-inferred rows never clobber an existing row unless ``overwrite`` is
+        set (manual wins). Returns the stored row.
+        """
+        start = max(0, min(1439, int(start_min)))
+        end = max(0, min(1440, int(end_min)))
+        with self._lock:
+            if overwrite:
+                self._conn.execute(
+                    """
+                    INSERT INTO sleep_windows
+                        (persona_id, user_id, day, start_min, end_min, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(persona_id, user_id, day) DO UPDATE SET
+                        start_min = excluded.start_min,
+                        end_min = excluded.end_min,
+                        source = excluded.source
+                    """,
+                    (persona_id, user_id, day, start, end, source),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO sleep_windows
+                        (persona_id, user_id, day, start_min, end_min, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (persona_id, user_id, day, start, end, source),
+                )
+            self._conn.commit()
+        return self.get_sleep_window(persona_id, user_id, day)
+
+    def list_activity_timestamps(
+        self, persona_id: str, user_id: str, *, since_iso: str, limit: int = 2000
+    ) -> list[str]:
+        """Return recent interaction timestamps for a private scope.
+
+        Zero-collection: reuses the emotion-event ledger timestamps plus the
+        latest interaction stamp. No raw text is involved, only timestamps.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT ts FROM emotion_events
+                 WHERE persona_id = ? AND user_id = ? AND ts >= ?
+                 ORDER BY ts DESC LIMIT ?
+                """,
+                (persona_id, user_id, since_iso, max(0, int(limit))),
+            ).fetchall()
+            stats = self._conn.execute(
+                "SELECT last_interaction_at FROM interaction_stats "
+                "WHERE persona_id = ? AND user_id = ?",
+                (persona_id, user_id),
+            ).fetchone()
+        stamps = [str(row["ts"]) for row in rows if row["ts"]]
+        if stats is not None and stats["last_interaction_at"]:
+            stamps.append(str(stats["last_interaction_at"]))
+        return stamps
+
+    def get_diary(self, persona_id: str, user_id: str, day: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM life_diary WHERE persona_id = ? AND user_id = ? AND day = ?",
+                (persona_id, user_id, day),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def insert_diary(
+        self, persona_id: str, user_id: str, day: str, *, summary: str, mood: str
+    ) -> bool:
+        """Insert a synthesized diary row once (``INSERT OR IGNORE``)."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO life_diary
+                    (persona_id, user_id, day, summary, mood)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (persona_id, user_id, day, summary, mood),
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     # -- helpers -----------------------------------------------------------
     def table_names(self) -> set[str]:

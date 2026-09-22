@@ -33,7 +33,13 @@ def _minutes_of_day(moment: datetime) -> int:
 
 @dataclass(frozen=True)
 class LifeState:
-    """Minimal life state snapshot for one persona at one instant."""
+    """Life state snapshot for one persona at one instant.
+
+    The v1.4 optional fields (``weather`` / ``meal`` / ``sleep`` / ``quiet``)
+    are additive: they stay ``None`` unless the life-line feature populates
+    them, and :meth:`to_dict` omits ``None`` values so the default structure is
+    byte-identical to v1.3.0.
+    """
 
     persona_id: str
     activity: str
@@ -41,9 +47,13 @@ class LifeState:
     scene: str
     summary: str
     as_of: str
+    weather: dict | None = None
+    meal: dict | None = None
+    sleep: dict | None = None
+    quiet: bool | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {key: value for key, value in asdict(self).items() if value is not None}
 
     @classmethod
     def degraded(cls, persona_id: str, as_of: str | None = None) -> LifeState:

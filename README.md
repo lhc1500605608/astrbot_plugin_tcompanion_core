@@ -16,9 +16,13 @@ TCompanion 核心基座：为 AstrBot 提供持久化的关系好感度、生活
 - 可选记忆桥接：若安装了记忆插件（如 tmemory），只读获取其用户画像与回忆，让主动
   内容与语气更贴合对方；未安装或读取失败时自动忽略，行为与未开启时完全一致，
   群聊不会使用画像。
+- 生活线：可选地带上天气（填城市后自动查询）、用餐、作息与昨日小结，并在休息时段
+  不主动打扰；未填城市或查询失败时自动忽略。**群聊不暴露**任何生活线信息，
+  只保存结构化字段，不保存消息原文。
 - 对外接口（契约）：`get_contract_info()` / `get_proactive_context()` /
   `get_life_state()` / `get_relationship()` / `record_emotion_event()` /
-  `get_emotion_context()` / `expression_decision()`，全部异步、缺失数据时自动降级。
+  `get_emotion_context()` / `expression_decision()` / `get_life_line()` /
+  `get_diary()`，全部异步、缺失数据时自动降级。
 - 本插件**不主动发消息、不自起调度器**，仅提供数据与决策。
 
 ## 界面
@@ -43,10 +47,12 @@ core/contract.py   # 对外接口（契约）
 core/db.py         # SQLite 建表与迁移
 core/store.py      # 存储读写（仅派生值，无消息原文）
 core/life_state.py # 生活状态与周模板日程
+core/life_line.py  # 生活线：配置/时间窗/作息推断/日记合成
+core/weather.py    # 天气查询（免 key，失败自动忽略）
 core/emotion.py    # 情绪事件与表达档位
 core/memory_bridge.py # 记忆插件的只读桥接（可选）
 core/kanjyou.py    # kanjyou 接入门禁
-_conf_schema.json  # emotion / expression / open_thread / memory_bridge 配置组
+_conf_schema.json  # emotion / expression / open_thread / memory_bridge / life_line 配置组
 docs/CONTRACT.md   # 接口字段与降级说明
 tests/             # 单测
 ```

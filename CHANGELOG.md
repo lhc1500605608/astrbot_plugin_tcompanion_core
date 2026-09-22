@@ -2,6 +2,56 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-09-23
+
+### Added
+- **Life line (Phase 2-D)**: schema **v6** adds three additive tables —
+  `sleep_windows` (`persona_id,user_id,day,start_min,end_min,source`),
+  `life_events` (`persona_id,user_id,ts,kind,payload_json,dedupe_key`,
+  `UNIQUE(persona_id,user_id,dedupe_key)` + `INSERT OR IGNORE`) and `life_diary`
+  (`persona_id,user_id,day,summary,mood`, `UNIQUE(persona_id,user_id,day)`).
+  Pure increment: no existing table/row is touched; old code keeps working.
+- **`LifeState` optional fields** `weather` / `meal` / `sleep` / `quiet`
+  (v1.4 additive). Defaults stay `None` and `to_dict()` omits them, so the
+  default structure is byte-identical to v1.3.0.
+- **Weather dimension** (`core/weather.py`): zero-key Open-Meteo geocoding +
+  forecast (`current=temperature_2m,weather_code,precipitation`), in-memory TTL
+  cache (45 min, never persisted), 3s timeout, **fail-closed** on no network /
+  timeout / parse error. `weather_api_base` overrides both endpoints (offline
+  stub); an empty `life_city` turns the dimension off.
+- **Sleep-window inference** (`core/life_line.py`): a 14-day hour-of-day
+  histogram of recent private interactions infers onset/wake from the longest
+  zero-activity block (>=4h, wrap-aware), clamped to onset `20:00–03:00` / wake
+  `05:00–11:00`; insufficient samples fall back to `23:00–07:30`. Stored per day
+  with `source=inferred|default`.
+- **Meal windows**: configurable breakfast/lunch/dinner windows; entering a
+  window records a deduped `life_events` row (`meal:{slot}:{day}`).
+- **Daily diary** (zero LLM): reading a day lazily synthesizes the previous
+  day's diary deterministically from its sleep window, meal slots, activity and
+  emotion — `INSERT OR IGNORE`, never raw text.
+- **Quiet-hours suppression**: `fuse_motivation(quiet=...)` gate priority is
+  `unanswered_streak` > `quiet_hours` > `quota`; under quiet the payload reports
+  `quota.allow=false` and `motivation.blocked_reason="quiet_hours"`.
+  `proactive_opt_in` or an interaction in the last 10 minutes exempts; group
+  scopes never participate.
+- **Contract**: `get_life_line(umo, day=None) -> dict`,
+  `get_diary(umo, day=None) -> dict | None`, and the optional
+  `get_proactive_context` key `life_detail` (weather/meal/sleep/quiet/diary;
+  private scopes only, group scopes stripped). `capabilities` gains
+  `life_line: true`; `api_version` stays `1`.
+- **Config group** `life_line` (`life_line_enabled` / `life_city` /
+  `meal_reminders_enabled` / `sleep_window_auto` / `quiet_hours` /
+  `proactive_opt_in` / meal windows + advanced weather keys). Existing keys,
+  defaults and behaviour are unchanged.
+- `docs/CONTRACT.md` §15; schema §7 updated to v6.
+
+### Notes
+- `api_version` stays `1`. With the life line disabled the
+  `get_proactive_context` output is field-for-field identical to v1.3.0.
+- Privacy: group scopes expose no life line/private detail; only structured
+  fields are stored (codes/windows/counts/a synthesized summary), never raw
+  message text; weather lives only in an in-memory, clearable cache.
+
 ## [1.3.0] - 2026-09-22
 
 ### Added

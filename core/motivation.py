@@ -315,6 +315,7 @@ def fuse_motivation(
     allow: bool = True,
     emotion_state: str = "",
     memory_hints: Sequence[str] = (),
+    quiet: bool = False,
 ) -> MotivationResult:
     """Fuse life event + open threads + time window into a scored candidate set.
 
@@ -341,6 +342,11 @@ def fuse_motivation(
     a **ranking** signal: a candidate whose label overlaps any hint gains at
     most :data:`MEMORY_HINT_BONUS`. Gates, lifecycle and ``adopted`` are
     unaffected (see ``docs/CONTRACT.md`` §14).
+
+    ``quiet`` (additive v1.4) is the effective quiet-hours flag for a private
+    scope. Gate priority is ``unanswered_streak`` > ``quiet`` > ``quota``: when
+    set, ``blocked_reason`` becomes ``"quiet_hours"`` and ``adopted`` is false,
+    independently of ``allow`` (the caller also flips ``quota.allow`` false).
     """
     index = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 0
     stage_bonus = STAGE_BONUS_STEP * index
@@ -412,6 +418,8 @@ def fuse_motivation(
 
     if unanswered_streak >= MAX_UNANSWERED_FOR_CONTEXT:
         blocked_reason = "unanswered_streak"
+    elif quiet:
+        blocked_reason = "quiet_hours"
     elif not allow:
         blocked_reason = "quota"
     else:

@@ -26,6 +26,8 @@ async def test_contract_info_shape(store):
     assert info["capabilities"]["motivation"] is True
     assert info["capabilities"]["open_threads"] is True
     assert info["capabilities"]["proactive"] is False
+    assert info["capabilities"]["life_line"] is True
+    assert all(isinstance(value, bool) for value in info["capabilities"].values())
 
 
 async def test_get_life_state_from_schedule(store):

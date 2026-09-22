@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "display_name": "TCompanion Core"
+  },
+  "pages": {
+    "status": {
+      "title": "TCompanion Status"
+    }
+  },
+  "status": {
+    "title": "TCompanion Status",
+    "loading": "Loading…",
+    "error": "Error loading data: {message}",
+    "life_state": {
+      "title": "Life State",
+      "empty": "No life state data for today.",
+      "activity": "Activity",
+      "scene": "Scene",
+      "energy": "Energy",
+      "as_of": "As of"
+    },
+    "relationships": {
+      "title": "Relationships",
+      "empty": "No relationships recorded.",
+      "user": "User",
+      "persona": "Persona",
+      "stage": "Stage",
+      "affinity": "Affinity",
+      "bond": "Bond",
+      "updated": "Updated",
+      "yes": "Yes",
+      "no": "No"
+    },
+    "emotion": {
+      "title": "Emotion & Expression",
+      "empty": "No emotion data recorded.",
+      "user": "User",
+      "persona": "Persona",
+      "state": "Emotion",
+      "valence": "Valence",
+      "mode": "Expression",
+      "last_event": "Last event",
+      "as_of": "As of"
+    },
+    "motivation": {
+      "title": "Motivation Audit",
+      "empty": "No motivation log entries.",
+      "persona": "Persona",
+      "user": "User",
+      "kind": "Kind",
+      "score": "Score",
+      "reason": "Reason",
+      "decision": "Decision",
+      "created": "Created",
+      "adopted": "Adopted",
+      "blocked": "Blocked: {reason}"
+    }
+  }
+}

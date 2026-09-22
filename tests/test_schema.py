@@ -108,7 +108,7 @@ def test_migrate_v4_to_v5_in_place_preserves_and_backfills(tmp_path):
         )
         conn.commit()
 
-        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 5
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
         row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
         # old row untouched
         assert row["title"] == "旧话题"
@@ -135,6 +135,66 @@ def test_v5_migration_is_idempotent(tmp_path):
         assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
     finally:
         conn.close()
+
+
+# -- schema v6 (life line) ------------------------------------------------
+def test_schema_v6_life_line_tables(store):
+    assert store.schema_version == schema.SCHEMA_VERSION == 6
+    assert {"sleep_windows", "life_events", "life_diary"} <= store.table_names()
+
+
+def test_migrate_v5_to_v6_in_place_preserves_and_adds(tmp_path):
+    """Old v5 rows survive; the three new tables start empty; idempotent."""
+    db_file = tmp_path / "v5.sqlite3"
+    conn = schema.connect(str(db_file))
+    try:
+        assert schema.apply_migrations(conn, target=5) == 5
+        conn.execute(
+            "INSERT INTO open_threads "
+            "(thread_id, umo, persona_id, title, status, opened_at, updated_at) "
+            "VALUES ('legacy', 'umo://u', 'p1', '旧话题', 'open', "
+            "'2026-09-10T10:00:00+00:00', '2026-09-11T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 6
+        row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
+        assert row["title"] == "旧话题"
+        assert row["status"] == "open"
+        for table in ("sleep_windows", "life_events", "life_diary"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+        # re-running is a no-op and never touches existing rows
+        for _ in range(3):
+            schema._migrate_v6(conn)
+        assert schema.apply_migrations(conn) == 6
+        assert conn.execute("SELECT COUNT(*) FROM open_threads").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_life_diary_is_idempotent_and_unique(store):
+    assert store.insert_diary("p1", "u1", "2026-09-20", summary="a", mood="平静") is True
+    assert store.insert_diary("p1", "u1", "2026-09-20", summary="b", mood="开心") is False
+    row = store.get_diary("p1", "u1", "2026-09-20")
+    assert row["summary"] == "a" and row["mood"] == "平静"
+
+
+def test_insert_life_event_dedupes(store):
+    stamp = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    assert store.insert_life_event(
+        "p1", "u1", kind="meal", dedupe_key="meal:lunch:2026-09-20", ts=stamp
+    ) is True
+    assert store.insert_life_event(
+        "p1", "u1", kind="meal", dedupe_key="meal:lunch:2026-09-20", ts=stamp
+    ) is False
+    rows = store.list_life_events("p1", "u1", day="2026-09-20", kind="meal")
+    assert len(rows) == 1
+    assert store.get_sleep_window("p1", "u1", "2026-09-20") is None
+    store.upsert_sleep_window("p1", "u1", "2026-09-20", start_min=1380, end_min=450, source="default")
+    # auto rows never clobber an existing row
+    store.upsert_sleep_window("p1", "u1", "2026-09-20", start_min=0, end_min=60, source="inferred")
+    assert store.get_sleep_window("p1", "u1", "2026-09-20")["start_min"] == 1380
 
 
 def test_open_threads_store_no_message_body(store):

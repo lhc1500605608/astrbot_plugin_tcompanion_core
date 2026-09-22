@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.3 修订）
+# TCompanion Core — 冻结契约 v1（v1.4 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.3 为纯向后兼容增量**，见 §11/§12/§13/§14）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.3.0`）
+- 契约版本：`api_version = 1`（**v1.4 为纯向后兼容增量**，见 §11/§12/§13/§14/§15）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.4.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -32,6 +32,18 @@
 >    （`mode` 不变；群聊/无记忆不变）；
 > 4. `fuse_motivation` 追加可选入参 `memory_hints`（仅影响候选**排序**，门控/生命周期不变）；
 > 5. 无新表、无 schema 变更，`schema_version` 仍为 `5`。
+>
+> v1.4 变更摘要（不破坏任何 v1.x 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `life_line`；
+> 2. 新增 `get_life_line(umo, day=None)` / `get_diary(umo, day=None)`（同时挂
+>    Star 实例与 `ContractV1`）；群聊返回隔离/缺省值；
+> 3. `get_proactive_context` 追加**可选**键 `life_detail`（天气/用餐/睡眠/安静/日记，
+>    **仅私聊**；关闭或群聊时该键缺省）；
+> 4. `fuse_motivation` 追加可选入参 `quiet`（门控优先级 `unanswered_streak` >
+>    `quiet_hours` > `quota`；命中时 `quota.allow=false` 且
+>    `motivation.blocked_reason="quiet_hours"`）；
+> 5. `LifeState` 追加**可选**字段 `weather`/`meal`/`sleep`/`quiet`（缺省时结构与 v1.3.0
+>    逐字段一致）；schema 升级到 `6`（三张纯增量新表）。
 
 ## 1. 通用约定
 
@@ -108,10 +120,10 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 
 ## 5. `get_proactive_context(umo, persona_id=None) -> dict`
 
-下游消费者（kanjyou 等）的聚合入口。**纯读**：不改写关系/情绪/账本状态
-（业务状态变更只经 `on_proactive_outcome` 与 observe 钩子）。**唯一例外**是未完
-话题的生命周期维护：本方法在读取前做一次幂等的 TTL/过期/LRU 推进（§13.3），
-因为 core 自身不启动调度器。v1 全字段如下：
+下游消费者（kanjyou 等）的聚合入口。**纯读业务状态**：不改写关系/情绪/账本
+（业务状态变更只经 `on_proactive_outcome` 与 observe 钩子）。读取路径上仅有**幂等
+维护写**：未完话题生命周期推进（§13.3）与生活线惰性合成（睡眠窗/用餐事件/日记，
+§15）——因为 core 自身不启动调度器。v1 全字段如下：
 
 | 字段 | 类型 | 必含 | 说明 |
 | --- | --- | --- | --- |
@@ -129,6 +141,7 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 | `emotion_state` | `dict \| None` | 否（v1.1 新增） | `{state, valence, last_event, as_of}`（§11.3）；群聊恒 `None` |
 | `expression` | `dict \| None` | 否（v1.1 新增） | `{mode, style_hints, reason}`（§12）；群聊为抑制后的安全档 |
 | `memory` | `dict` | 否（v1.3 新增） | 记忆桥只读载荷（§14.2）；桥不可用/无数据时**整键缺省**；群聊只含 `snippets` |
+| `life_detail` | `dict` | 否（v1.4 新增） | `{weather, meal, sleep, quiet, diary}`（§15.2）；**仅启用且私聊**，群聊/关闭时**整键缺省** |
 | `degraded` | `bool` | 是 | 存储异常 / `life_state` 缺失或降级时为 `true` |
 
 > `emotion_state` / `expression` 是 v1.1 的**可选追加键**：老客户端（kanjyou
@@ -225,13 +238,14 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 fail-closed 处理。回归由 `tests/test_star_surface.py` 钉住：断言 Star 的公开
 async 面与 `ContractV1` 完全一致。
 
-## 7. SQLite schema（`schema_version = 5`）
+## 7. SQLite schema（`schema_version = 6`）
 
 库文件：`get_astrbot_plugin_data_path()/astrbot_plugin_tcompanion_core/tcompanion_core.sqlite3`。
 
 表：`personas` / `life_state_daily` / `life_schedule` / `relationships` /
 `affinity_ledger` / `interaction_stats` / `open_threads` / `motivation_log` /
-`emotion_events`（另有迁移元表 `schema_meta`）。
+`emotion_events` / `sleep_windows` / `life_events` / `life_diary`
+（另有迁移元表 `schema_meta`）。
 
 v2（T2）将关系三表重构为真实模型，键均为 `(persona_id, user_id)`：
 
@@ -267,9 +281,21 @@ v5（v1.2，Phase 2-B）为**纯增量**：为 `open_threads` 追加生命周期
 （v1.1.x）用显式列名插入，新列自动取默认值，故无需回滚。新增索引
 `(umo, persona_id, status, last_seen_ts)` 与 `(umo, persona_id, dedupe_key)`。
 
+v6（v1.4，Phase 2-D）为**纯增量**：新增三张表，`CREATE TABLE IF NOT EXISTS` +
+> 索引，**不触碰任何既有表或旧行**，重复执行不报错。旧代码（v1.3.x）不查询新表，
+> 可安全共存，无需回滚。
+
+- `sleep_windows(persona_id, user_id, day, start_min, end_min, source)` —— 每日推断/
+  默认睡眠窗口，主键 `(persona_id, user_id, day)`；`source` = `inferred|default|manual`。
+- `life_events(persona_id, user_id, ts, kind, payload_json, dedupe_key)` —— 结构化生活
+  事件，`UNIQUE(persona_id, user_id, dedupe_key)` + `INSERT OR IGNORE`（用餐键
+  `meal:{slot}:{day}`）；`payload_json` 仅结构化字段。
+- `life_diary(persona_id, user_id, day, summary, mood)` —— 每日合成小结，`UNIQUE(...)`；
+  `summary` 为**确定性模板合成**（非用户原文）。
+
 > v1/v2 表仅存派生值、无消息原文，故重构/追加均安全；迁移仍幂等：
-> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v5；
-> 既有 v2/v3/v4 库会安全原地升级到 v5。
+> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v6；
+> 既有 v2/v3/v4/v5 库会安全原地升级到 v6。
 
 **隐私不变式**：以上任何表都不含消息原文/正文列。`life_state_daily.summary`
 为模型生成的当日生活摘要，`open_threads.title` 为话题标题，均非消息原文。
@@ -604,3 +630,88 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 - 不反向写入关联记忆插件；不生成/蒸馏画像。
 - 不引入新的 LLM 调用（纯读 + 轻量规则）。
 - 不改关联插件自身的召回注入逻辑。
+
+## 15. 生活线（v1.4 · Phase 2-D）
+
+实现：`core/life_line.py`（配置/时间窗/睡眠推断/日记模板）+ `core/weather.py`
+（天气）+ `core/contract.py`（消费点）。schema → `6`（三张纯增量新表），`api_version`
+仍为 `1`。零新增 LLM 调用；所有外部数据源 fail-closed。
+
+### 15.1 数据模型（schema v6）
+
+- `sleep_windows(persona_id, user_id, day, start_min, end_min, source)`：每日作息窗，
+  主键 `(persona_id, user_id, day)`；`source=inferred|default|manual`。
+- `life_events(persona_id, user_id, ts, kind, payload_json, dedupe_key)`：
+  `UNIQUE(persona_id, user_id, dedupe_key)` + `INSERT OR IGNORE`，去重键形如
+  `meal:{slot}:{day}`。
+- `life_diary(persona_id, user_id, day, summary, mood)`：`UNIQUE(...)`；`summary` 为
+  确定性模板合成，**不存用户原文**。
+- 全部纯增量：旧库迁移无损、幂等；旧代码不查新表可共存。
+
+### 15.2 契约增量
+
+- `LifeState` 追加**可选**字段 `weather{code,temp,precip}` / `meal{next_window}` /
+  `sleep{window,since}` / `quiet`；缺省为 `None` 且 `to_dict()` 省略，故默认结构与
+  v1.3.0 逐字段一致。
+- `async get_life_line(umo, day=None) -> dict`：生活线快照。私聊返回
+  `{api_version, umo, persona_id, day, weather, meal, sleep, quiet, diary,
+  isolated, degraded}`；**群聊**返回 `isolated=true` 且各维度为缺省；`life_line`
+  关闭时返回中性缺省。逐维度独立降级。
+- `async get_diary(umo, day=None) -> dict | None`：当日（或指定日）合成日记。群聊/
+  关闭/无数据返回 `None`。
+- `get_proactive_context` 追加**可选**键 `life_detail`
+  `{weather, meal, sleep, quiet, diary}`：**仅启用且私聊**时出现，群聊/关闭时该键
+  **缺省**（老客户端忽略未知键）。
+- `capabilities` 追加 `life_line: true`（`dict[str, bool]` 形状不变）。
+
+### 15.3 天气维度（`core/weather.py`）
+
+- 免 key 内置源：Open-Meteo geocoding + forecast
+  （`current=temperature_2m,weather_code,precipitation`）。
+- `life_city` 为空 → 整个维度关闭；`weather_api_base` 覆盖**两个**端点（离线 stub）。
+- 超时默认 3s；结果仅存**内存 TTL 缓存**（默认 45min，可清），不落库。
+- **fail-closed**：无网/超时/解析失败/字段缺失 → `weather=null`，行为等同未启用。
+
+### 15.4 睡眠推断与安静时段抑制
+
+- 样本：私聊 scope 近 14 天交互时间戳的小时直方图（零采集，仅时间戳）。
+- 推断：最长连续「零活动」小时段（≥4h，跨午夜环绕）→ 前一个活跃小时为入睡、后一个
+  为起床；钳制入睡 ∈[20:00,03:00]、起床 ∈[05:00,11:00]。样本不足（<3 活跃日或
+  <10 条）→ 默认 `23:00–07:30`。按日写 `sleep_windows`。
+- `sleep_window_auto=false` → 只用配置 `quiet_hours`。
+- 抑制（D3，**仅自主主动消息**，群聊不参与）：`fuse_motivation(quiet=true)`，
+  优先级 `unanswered_streak` > `quiet_hours` > `quota`；命中 → `quota.allow=false`
+  且 `motivation.blocked_reason="quiet_hours"`。例外：`proactive_opt_in=true` 或
+  用户近 10 分钟内有交互。
+
+### 15.5 用餐与日记
+
+- 用餐：可配早/午/晚窗口；读取时若当前处于某窗口，则写入去重事件
+  `life_events(meal:{slot}:{day})`。
+- 日记：读取 D 日时若 D-1 无日记行，则由 D-1 的睡眠窗/用餐/活动/情绪**零 LLM 确定性
+  合成**（`synthesize_diary`），`INSERT OR IGNORE`。不存用户原文。
+
+### 15.6 配置（`life_line` 组，面向用户）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `life_line_enabled` | `bool` | `true` | 启用生活线 |
+| `life_city` | `string` | `""` | 城市；留空则不用天气 |
+| `meal_reminders_enabled` | `bool` | `true` | 用餐到点关心 |
+| `sleep_window_auto` | `bool` | `true` | 自动推断作息 |
+| `quiet_hours` | `string` | `23:00-07:30` | 安静时段 |
+| `proactive_opt_in` | `bool` | `false` | 安静时段也允许主动 |
+| `breakfast_window` / `lunch_window` / `dinner_window` | `string` | `07:00-09:00` / `11:30-13:00` / `18:00-20:00` | 用餐时段 |
+| `weather_api_base` | `string` | `""` | 天气接口地址（高级） |
+| `weather_timeout_sec` / `weather_ttl_min` | `float` / `int` | `3.0` / `45` | 天气超时/缓存 |
+
+- 兼容扁平键（`life_line_enabled` / `life_city` / `quiet_hours` …）与嵌套组内
+  `enabled`；组存在时以组为准。配置每次读取重新解析（热更新即时生效）。
+
+### 15.7 边界与隐私
+
+- 未启用任何数据源（`life_line_enabled=false`）时，`get_proactive_context` 输出与
+  v1.3.0 **逐字段一致**。
+- **群聊剥离**全部 `life_detail`/私聊生活线；只存结构化字段（码/时段/计数/合成摘要），
+  **不存用户原文**；天气仅内存缓存、可清。
+- 位置/周期/梦境**不在本阶段**（不加开关、不落配置）。本阶段不引入新的 LLM 调用。

@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "display_name": "TCompanion 核心"
+  },
+  "pages": {
+    "status": {
+      "title": "TCompanion 状态"
+    }
+  },
+  "status": {
+    "title": "TCompanion 状态",
+    "loading": "加载中…",
+    "error": "加载失败：{message}",
+    "life_state": {
+      "title": "生活状态",
+      "empty": "今日暂无生活状态数据。",
+      "activity": "活动",
+      "scene": "场景",
+      "energy": "精力",
+      "as_of": "更新时间"
+    },
+    "relationships": {
+      "title": "关系",
+      "empty": "暂无关系数据。",
+      "user": "用户",
+      "persona": "人设",
+      "stage": "关系阶段",
+      "affinity": "好感度",
+      "bond": "羁绊",
+      "updated": "更新时间",
+      "yes": "是",
+      "no": "否"
+    },
+    "emotion": {
+      "title": "情绪与表达",
+      "empty": "暂无情绪数据。",
+      "user": "用户",
+      "persona": "人设",
+      "state": "情绪",
+      "valence": "情绪倾向",
+      "mode": "表达",
+      "last_event": "最近事件",
+      "as_of": "更新时间"
+    },
+    "motivation": {
+      "title": "主动消息记录",
+      "empty": "暂无主动消息记录。",
+      "persona": "人设",
+      "user": "用户",
+      "kind": "类型",
+      "score": "分数",
+      "reason": "原因",
+      "decision": "结果",
+      "created": "创建时间",
+      "adopted": "已采用",
+      "blocked": "已拦截：{reason}"
+    }
+  }
+}

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1] - 2026-09-23
+
+### Changed
+- **Display name**: 插件外显名统一为 **Hearthlight · 守灯**（插件标识名
+  `astrbot_plugin_tcompanion_core`、行为、配置键与契约均不变）；README 标题、
+  插件库/面板显示名与状态页标题同步更新。
+
 ## [1.5.0] - 2026-09-23
 
 ### Added

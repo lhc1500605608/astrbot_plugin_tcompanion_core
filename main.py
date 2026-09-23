@@ -23,7 +23,7 @@ from .core.store import Store
 @register(
     PLUGIN_NAME,
     "tcompanion",
-    "TCompanion 核心基座：为 AstrBot 提供关系好感度、生活状态与情绪表达档位的持久化数据。",
+    "Hearthlight · 守灯：为 AstrBot 提供关系好感度、生活状态与情绪表达档位的持久化数据。",
     PLUGIN_VERSION,
 )
 class TCompanionCore(Star):

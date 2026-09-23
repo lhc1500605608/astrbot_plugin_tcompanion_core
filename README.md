@@ -1,10 +1,10 @@
-# TCompanion Core
+# Hearthlight · 守灯
 
 <div align="center">
-  <img src="./logo.png" alt="TCompanion Core" width="180">
+  <img src="./logo.png" alt="Hearthlight · 守灯" width="180">
 </div>
 
-TCompanion 核心基座：为 AstrBot 提供持久化的关系好感度、生活状态与情绪表达档位，
+Hearthlight · 守灯核心基座：为 AstrBot 提供持久化的关系好感度、生活状态与情绪表达档位，
 供上层插件（如 kanjyou）读取使用。
 
 ## 能力

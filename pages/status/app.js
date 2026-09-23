@@ -226,6 +226,6 @@ async function loadAll() {
 }
 
 await bridge.ready();
-document.title = t("status.title", "TCompanion Status");
+document.title = t("status.title", "Hearthlight Status");
 applyI18n(document);
 await loadAll();

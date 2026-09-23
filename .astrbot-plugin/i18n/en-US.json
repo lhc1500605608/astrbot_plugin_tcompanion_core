@@ -1,14 +1,14 @@
 {
   "metadata": {
-    "display_name": "TCompanion Core"
+    "display_name": "Hearthlight · 守灯"
   },
   "pages": {
     "status": {
-      "title": "TCompanion Status"
+      "title": "Hearthlight Status"
     }
   },
   "status": {
-    "title": "TCompanion Status",
+    "title": "Hearthlight Status",
     "loading": "Loading…",
     "error": "Error loading data: {message}",
     "life_state": {

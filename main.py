@@ -65,6 +65,18 @@ class TCompanionCore(Star):
             "Derived emotion state / expression mode per relationship (read-only)",
         )
         context.register_web_api(
+            f"/{PLUGIN_NAME}/group-state",
+            self.api_group_state,
+            ["GET"],
+            "Group activity + advisory participation gate (read-only)",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/growth-state",
+            self.api_growth_state,
+            ["GET"],
+            "Derived growth per private relationship (read-only)",
+        )
+        context.register_web_api(
             f"/{PLUGIN_NAME}/person/keys",
             self.api_person_keys,
             ["GET"],
@@ -318,6 +330,18 @@ class TCompanionCore(Star):
                 }
             )
         return json_response({"items": items})
+
+    async def api_group_state(self):
+        """Flat group activity + advisory gate; a pure read (never stamps)."""
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        return json_response({"items": self._contract().list_group_states()})
+
+    async def api_growth_state(self):
+        """Flat derived growth per private relationship (read-only)."""
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        return json_response({"items": self._contract().list_growth_states()})
 
     async def _json_body(self) -> dict:
         if _web_request is None:

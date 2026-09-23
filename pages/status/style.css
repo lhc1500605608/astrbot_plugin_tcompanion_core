@@ -68,6 +68,12 @@ body {
   font-style: italic;
 }
 
+.section-summary {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
 /* Life State cards */
 .ls-grid {
   display: grid;

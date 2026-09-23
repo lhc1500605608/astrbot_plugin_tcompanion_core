@@ -206,23 +206,119 @@ function renderEmotionState(data) {
   el.innerHTML = html;
 }
 
-async function loadAll() {
-  try {
-    const [lifeState, relationships, motivationLog, emotionState] = await Promise.all([
-      bridge.apiGet("life-state"),
-      bridge.apiGet("relationships"),
-      bridge.apiGet("motivation-log"),
-      bridge.apiGet("emotion-state"),
-    ]);
-    renderLifeState(lifeState);
-    renderRelationships(relationships);
-    renderMotivationLog(motivationLog);
-    renderEmotionState(emotionState);
-  } catch (err) {
-    console.error("Failed to load status data:", err);
-    document.getElementById("life-state-content").innerHTML =
-      `<p class="empty-msg">${esc(tf("status.error", { message: err.message }, "Error loading data: {message}"))}</p>`;
+function activityLabel(level) {
+  const key = (level || "").toLowerCase();
+  if (key === "high") return t("status.group.activity_high", "High");
+  if (key === "medium") return t("status.group.activity_medium", "Medium");
+  if (key === "low") return t("status.group.activity_low", "Low");
+  return level || "—";
+}
+
+function participationLabel(part) {
+  if (!part || typeof part !== "object") {
+    return t("status.group.part_unknown", "Unknown");
   }
+  if (part.allow) return t("status.group.part_ok", "Open");
+  const reason = String(part.reason || "");
+  if (reason === "cooldown") return t("status.group.part_cooldown", "Cooling down");
+  if (reason === "hourly_limit") return t("status.group.part_hourly_limit", "Hourly limit reached");
+  if (reason === "group_busy") return t("status.group.part_group_busy", "Group is busy");
+  if (reason === "disabled") return t("status.group.part_disabled", "Disabled");
+  return t("status.group.part_unknown", "Unknown");
+}
+
+function renderGroupState(data) {
+  const el = document.getElementById("group-state-content");
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (items.length === 0) {
+    el.innerHTML = `<p class="empty-msg">${esc(t("status.group.empty", "No group chat data yet."))}</p>`;
+    return;
+  }
+  let html = `<p class="section-summary">${esc(tf("status.group.summary", { count: items.length }, "{count} groups"))}</p>`;
+  html += '<div class="ls-grid">';
+  for (const item of items) {
+    const group = (item && typeof item.group === "object" && item.group) || item || {};
+    const part = (item && typeof item.participation === "object" && item.participation) || item || {};
+    const topic = String(group.topic || "");
+    html += `
+      <div class="ls-card">
+        <div class="persona">${esc(String(item.umo || "—"))}</div>
+        <div class="field"><span class="label">${esc(t("status.group.member_count", "Members"))}</span><span class="value">${esc(String(group.member_count ?? "—"))}</span></div>
+        <div class="field"><span class="label">${esc(t("status.group.activity", "Activity"))}</span><span class="value">${esc(activityLabel(group.activity_level))}</span></div>
+        <div class="field"><span class="label">${esc(t("status.group.participation", "Participation"))}</span><span class="value">${esc(participationLabel(part))}</span></div>
+        ${topic ? `<div class="field"><span class="label">${esc(t("status.group.topic", "Topic"))}</span><span class="value">${esc(topic)}</span></div>` : ""}
+        <div class="field"><span class="label">${esc(t("status.group.last_activity", "Last active"))}</span><span class="value">${formatDateTime(group.last_activity)}</span></div>
+      </div>`;
+  }
+  html += "</div>";
+  el.innerHTML = html;
+}
+
+function growthPercent(val) {
+  const n = Number(val);
+  if (isNaN(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n * 100)));
+}
+
+function renderGrowthState(data) {
+  const el = document.getElementById("growth-state-content");
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (items.length === 0) {
+    el.innerHTML = `<p class="empty-msg">${esc(t("status.growth.empty", "No growth data yet."))}</p>`;
+    return;
+  }
+  let html = '<div class="ls-grid">';
+  for (const item of items) {
+    const growth = (item && typeof item.growth === "object" && item.growth) || item || {};
+    const level = growth.level ?? "—";
+    const maxLevel = growth.max_level ?? "—";
+    const pct = growthPercent(growth.progress);
+    const traits = Array.isArray(growth.traits) ? growth.traits.filter(Boolean) : [];
+    html += `
+      <div class="ls-card">
+        <div class="persona">${esc(String(item.persona_id || "—"))}</div>
+        <div class="field"><span class="label">${esc(t("status.growth.user", "User"))}</span><span class="value">${esc(String(item.user_id || "—"))}</span></div>
+        <div class="field"><span class="label">${esc(t("status.growth.level", "Level"))}</span><span class="value">${esc(String(level))} / ${esc(String(maxLevel))}</span></div>
+        <div class="field"><span class="label">${esc(t("status.growth.progress", "Progress"))}</span><span class="value">${pct}%</span></div>
+        <div class="energy-bar"><div class="fill" style="width:${pct}%"></div></div>
+        ${traits.length ? `<div class="field"><span class="label">${esc(t("status.growth.traits", "Traits"))}</span><span class="value">${esc(traits.join("、"))}</span></div>` : ""}
+      </div>`;
+  }
+  html += "</div>";
+  el.innerHTML = html;
+}
+
+function unavailableMsg() {
+  return `<p class="empty-msg">${esc(t("status.unavailable", "Data is unavailable right now."))}</p>`;
+}
+
+async function loadSection(elementId, path, render) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  try {
+    const data = await bridge.apiGet(path);
+    if (!data || typeof data !== "object") {
+      throw new Error("invalid response");
+    }
+    if (data.error) {
+      throw new Error(String(data.error));
+    }
+    render(data);
+  } catch (err) {
+    console.error(`Failed to load ${path}:`, err);
+    el.innerHTML = unavailableMsg();
+  }
+}
+
+async function loadAll() {
+  await Promise.all([
+    loadSection("life-state-content", "life-state", renderLifeState),
+    loadSection("relationships-content", "relationships", renderRelationships),
+    loadSection("motivation-content", "motivation-log", renderMotivationLog),
+    loadSection("emotion-content", "emotion-state", renderEmotionState),
+    loadSection("group-state-content", "group-state", renderGroupState),
+    loadSection("growth-state-content", "growth-state", renderGrowthState),
+  ]);
 }
 
 await bridge.ready();

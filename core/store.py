@@ -1400,6 +1400,15 @@ class Store:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def list_group_activities(self, limit: int = 200) -> list[dict]:
+        """Return recent group activity rows, newest first (read-only panel)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM group_activity ORDER BY last_activity_ts DESC LIMIT ?",
+                (max(0, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # -- growth state (v1.6) ----------------------------------------------
     def get_growth_state(self, persona_id: str, user_id: str) -> dict | None:
         with self._lock:

@@ -1098,6 +1098,85 @@ class ContractV1:
             "drift": view["drift"],
         }
 
+    # -- read-only panel projections (v1.6) --------------------------------
+    def list_group_states(self, *, now: datetime | None = None) -> list[dict]:
+        """Flat, read-only projection of every tracked group (panel only).
+
+        See ``docs/CONTRACT.md`` §17: this is a pure read — it never stamps a
+        participation slot (``stamp=False``), so ``part_hour_count`` and
+        ``last_participation_ts`` are untouched. A disabled ``group`` section
+        yields an empty list. No private/person/relationship fields leak.
+        """
+        cfg = self._group_config()
+        if not cfg.enabled:
+            return []
+        moment = now or self._clock()
+        items: list[dict] = []
+        for row in self._store.list_group_activities():
+            umo = str(row.get("umo") or "")
+            if not umo:
+                continue
+            try:
+                view = self._group_context(umo, moment, stamp=False)
+            except Exception:
+                continue
+            if view is None:
+                continue
+            group = view.get("group") or {}
+            participation = view.get("participation") or {}
+            items.append(
+                {
+                    "umo": umo,
+                    "member_count": int(group.get("member_count") or 0),
+                    "activity_level": str(group.get("activity_level") or ""),
+                    "topic": str(group.get("topic") or ""),
+                    "topic_age_min": group.get("topic_age_min"),
+                    "last_activity": str(group.get("last_activity") or ""),
+                    "allow": bool(participation.get("allow")),
+                    "reason": str(participation.get("reason") or ""),
+                    "cooldown_remaining_sec": int(
+                        participation.get("cooldown_remaining_sec") or 0
+                    ),
+                    "hourly_remaining": int(participation.get("hourly_remaining") or 0),
+                }
+            )
+        return items
+
+    def list_growth_states(self, *, now: datetime | None = None) -> list[dict]:
+        """Flat, read-only projection of growth for every private scope (panel).
+
+        Growth is private-only, so the source is ``relationships`` (group scopes
+        live in the dedicated group tables). Derivation mirrors
+        ``get_growth_context`` and idempotently writes the level/xp high-water
+        mark; a disabled or reset ``growth`` section yields an empty list.
+        """
+        cfg = self._growth_config()
+        if not growth_available(cfg):
+            return []
+        moment = now or self._clock()
+        items: list[dict] = []
+        for rel in self._store.list_relationships():
+            persona_id = str(rel.get("persona_id") or "")
+            user_id = str(rel.get("user_id") or "")
+            if not user_id:
+                continue
+            try:
+                view = self._growth_for(user_id, persona_id, cfg, moment, persist=True)
+            except Exception:
+                continue
+            growth = view.get("growth") or {}
+            items.append(
+                {
+                    "persona_id": persona_id,
+                    "user_id": user_id,
+                    "level": int(growth.get("level") or 0),
+                    "progress": float(growth.get("progress") or 0.0),
+                    "max_level": int(growth.get("max_level") or 0),
+                    "traits": list(growth.get("traits") or []),
+                }
+            )
+        return items
+
     # -- life line (v1.4) --------------------------------------------------
     async def get_life_line(self, umo: str, day: str | None = None) -> dict:
         """Return the structured life-line snapshot for ``umo`` on ``day``.

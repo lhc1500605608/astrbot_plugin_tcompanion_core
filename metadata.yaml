@@ -1,5 +1,5 @@
 name: astrbot_plugin_tcompanion_core # 插件唯一识别名（占位，以 astrbot_plugin_ 前缀开头）
 display_name: Hearthlight · 守灯 # 用于展示的名字
 desc: Hearthlight · 守灯：为 AstrBot 提供关系好感度、生活状态与情绪表达档位的持久化数据。 # 插件简短描述
-version: v1.5.1 # 插件版本号
+version: v1.6.0 # 插件版本号
 author: tcompanion # 作者

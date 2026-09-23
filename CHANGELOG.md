@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-09-23
+
+### Added
+- **Group understanding (3-A)**: `record_group_activity(umo, *, member_id,
+  topic, now)` stores bounded per-group aggregates only (hourly/day counts, a
+  sanitized short topic label, last activity) plus a local member familiarity
+  counter keyed `group:<session>#<member>`. **Never raw text, never merged with
+  a private `person`, never aggregated across groups.** Private scopes are a
+  no-op (`isolated=true`).
+- `get_group_context(umo, persona_id=None, *, member_id=None)`: group →
+  `{group:{member_count, activity_level, topic, topic_age_min, last_activity},
+  participation:{allow, reason, cooldown_remaining_sec, hourly_remaining},
+  member:{member_key, familiarity, is_known}, degraded}`; private or a disabled
+  section → `isolated=true`. The advisory gate order is `cooldown` (default
+  90s) → `hourly_limit` (default 6/h) → `group_busy` (default 120/h) → `ok`.
+- `get_proactive_context` group branch gains the optional `group` /
+  `participation` keys (private-only keys stay absent for groups).
+- **Growth (3-C)**: `get_growth_context(umo, persona_id=None)` derives
+  `{growth:{level, progress, max_level, traits}, drift:{warmth_delta,
+  verbosity_delta}}` deterministically from the existing ledger (affinity/stage,
+  emotion events, active days) — zero LLM, zero new ingest. `expression_decision`
+  adds a bounded growth drift onto `style_hints.warmth` (`+0.00`~`drift_cap`,
+  hard cap `0.05`) and **never changes `mode`**. Groups → isolated empty.
+- **Config**: new `group` and `growth` groups (`_conf_schema.json`) with
+  user-facing copy only (what it does / default / unit).
+- **Storage**: schema `v6 → v7`, pure additive `CREATE TABLE IF NOT EXISTS`
+  (`group_activity`, `group_members`, `growth_state` with `reset_at`);
+  migration is idempotent and never rewrites existing rows.
+- **Contract**: `capabilities` gains `group_aware: true` and `growth: true`;
+  `api_version` stays `1`.
+- **Rollback**: disabling `group.enabled` / `growth.enabled` — or setting
+  `growth.reset` — falls back to the previous behaviour; missing/erroring data
+  degrades per-capability and never raises.
+- `docs/CONTRACT.md` §17, §18.
+
 ## [1.5.1] - 2026-09-23
 
 ### Changed

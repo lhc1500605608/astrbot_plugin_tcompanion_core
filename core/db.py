@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Callable
 
 #: Current target schema version.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: A migration step is either a SQL script or a callable taking the connection
 #: (needed when the DDL must be guarded by a runtime check, e.g. column
@@ -135,6 +135,58 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
             summary    TEXT NOT NULL DEFAULT '',
             mood       TEXT NOT NULL DEFAULT '',
             UNIQUE (persona_id, user_id, day)
+        );
+        """
+    )
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v7: group-understanding + growth tables (additive).
+
+    Pure increment: three new tables created with ``CREATE TABLE IF NOT
+    EXISTS`` (plus indexes), so re-running is a no-op and **no existing table or
+    row is touched**. Old code (v1.5.x) never queries these tables and keeps
+    working unchanged. Only bounded aggregates are stored (counts, timestamps,
+    a sanitized short label) — **never raw message text**.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS group_activity (
+            umo                 TEXT PRIMARY KEY,
+            message_count       INTEGER NOT NULL DEFAULT 0,
+            hour_key            TEXT NOT NULL DEFAULT '',
+            hour_count          INTEGER NOT NULL DEFAULT 0,
+            day                 TEXT NOT NULL DEFAULT '',
+            day_count           INTEGER NOT NULL DEFAULT 0,
+            topic               TEXT NOT NULL DEFAULT '',
+            topic_ts            TEXT NOT NULL DEFAULT '',
+            last_activity_ts    TEXT NOT NULL DEFAULT '',
+            last_participation_ts TEXT NOT NULL DEFAULT '',
+            part_hour_key       TEXT NOT NULL DEFAULT '',
+            part_hour_count     INTEGER NOT NULL DEFAULT 0,
+            updated_at          TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS group_members (
+            umo          TEXT NOT NULL,
+            member_key   TEXT NOT NULL,
+            familiarity  INTEGER NOT NULL DEFAULT 0,
+            msg_count    INTEGER NOT NULL DEFAULT 0,
+            first_seen_ts TEXT NOT NULL DEFAULT '',
+            last_seen_ts TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (umo, member_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_members_last_seen
+            ON group_members (umo, last_seen_ts);
+
+        CREATE TABLE IF NOT EXISTS growth_state (
+            persona_id  TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            level       INTEGER NOT NULL DEFAULT 0,
+            xp          REAL NOT NULL DEFAULT 0,
+            reset_at    TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (persona_id, user_id)
         );
         """
     )
@@ -306,6 +358,7 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (4, _migrate_v4),
     (5, _migrate_v5),
     (6, _migrate_v6),
+    (7, _migrate_v7),
 )
 
 #: All tables that must exist after migration, used by tests/health checks.
@@ -323,6 +376,9 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "sleep_windows",
     "life_events",
     "life_diary",
+    "group_activity",
+    "group_members",
+    "growth_state",
 )
 
 

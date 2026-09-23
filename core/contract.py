@@ -22,6 +22,24 @@ from .emotion import (
     event_delta,
     expression_for,
 )
+from .group import (
+    GroupConfig,
+    activity_level,
+    evaluate_participation,
+    member_key_for,
+    parse_group_config,
+    topic_age_min,
+)
+from .growth import (
+    GrowthConfig,
+    derive_drift,
+    derive_level,
+    derive_traits,
+    derive_xp,
+    growth_available,
+    parse_growth_config,
+    with_growth_drift,
+)
 from .life_line import (
     QUIET_INTERACTION_GRACE_MIN,
     SLEEP_INFER_DAYS,
@@ -58,7 +76,7 @@ from .weather import WeatherClient
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.5.1"
+PLUGIN_VERSION = "1.6.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -177,6 +195,9 @@ class ContractV1:
                 "life_line": True,
                 # additive v1.5 key; the map shape stays dict[str, bool]
                 "identity_binding": True,
+                # additive v1.6 keys (Phase 3-A/3-C); the map shape stays dict[str, bool]
+                "group_aware": True,
+                "growth": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -451,6 +472,18 @@ class ContractV1:
                 # is reported exhausted and the motivation is blocked.
                 quota = {**quota, "allow": False}
 
+        # group understanding (v1.6; group scopes only — private keys stay absent)
+        group_block: dict | None = None
+        participation_block: dict | None = None
+        if is_group:
+            try:
+                gctx = self._group_context(umo, moment, stamp=False)
+                if gctx is not None:
+                    group_block = gctx.get("group")
+                    participation_block = gctx.get("participation")
+            except Exception:
+                degraded = True
+
         # optional memory bridge payload (v1.3; group scopes get snippets only)
         memory = await self._memory_payload(
             umo,
@@ -521,6 +554,13 @@ class ContractV1:
         # (absent for no bridge / plugin missing / timeout / error / no memory).
         if memory is not None:
             result["memory"] = memory
+        # Optional v1.6 keys: group understanding + advisory participation gate
+        # (group scopes only; absent when the section is disabled or on failure,
+        # so private-only keys above stay absent for groups too).
+        if group_block is not None:
+            result["group"] = group_block
+        if participation_block is not None:
+            result["participation"] = participation_block
         return result
 
     async def on_proactive_outcome(
@@ -877,7 +917,9 @@ class ContractV1:
         ``放松``/``活泼``/``温暖`` with ``warmth <= 0.55``. When the memory
         bridge surfaces a user profile the ``style_hints["warmth"]`` is nudged
         up by at most +0.05 (never above the mode's base + 0.05, never changing
-        ``mode``); without memory the result is unchanged.
+        ``mode``); without memory the result is unchanged. A v1.6 growth drift
+        (``+0.00``~``drift_cap``, capped at ``0.05``) is then added on top when
+        the ``growth`` section is enabled; it also never changes ``mode``.
         """
         moment = self._clock()
         try:
@@ -915,7 +957,146 @@ class ContractV1:
             is_group=False,
         )
         decision = await self._nudge_warmth_with_memory(decision, umo)
+        decision = await self._nudge_warmth_with_growth(decision, scope, resolved or "", moment)
         return self._expression_payload(decision)
+
+    # -- group understanding (v1.6) ----------------------------------------
+    async def record_group_activity(
+        self,
+        umo: str,
+        *,
+        member_id: str | None = None,
+        topic: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """Record bounded group activity counters (v1.6, group scopes only).
+
+        Stores only counts, timestamps and an optional sanitized short ``topic``
+        label — never message text. ``member_id`` is reduced to a **local**
+        member key ``group:<session>#<member>`` and never merged with a private
+        ``person`` or aggregated across groups. Private scopes are a no-op
+        (``isolated=True``), as is a disabled ``group`` section.
+        Returns ``{applied, isolated, group, degraded}``.
+        """
+        moment = now or self._clock()
+        base = {"applied": False, "isolated": False, "group": None, "degraded": False}
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "reason": "bad_umo", "degraded": True}
+        if not key.is_group:
+            return {**base, "isolated": True, "reason": "private_isolated"}
+        cfg = self._group_config()
+        if not cfg.enabled:
+            return {**base, "isolated": True, "reason": "disabled"}
+        try:
+            clean_topic = sanitize_thread_title(topic) if topic else ""
+            self._store.bump_group_activity(
+                umo, topic=clean_topic or None, now=moment
+            )
+            if cfg.member_tracking_enabled and member_id:
+                member_key = member_key_for(key.user_id, member_id)
+                if member_key:
+                    self._store.bump_group_member(umo, member_key, now=moment)
+        except Exception:
+            return {**base, "reason": "storage_error", "degraded": True}
+        view = self._group_context(umo, moment, member_id=member_id, stamp=False)
+        return {
+            **base,
+            "applied": True,
+            "isolated": False,
+            "group": (view or {}).get("group"),
+        }
+
+    async def get_group_context(
+        self, umo: str, persona_id: str | None = None, *, member_id: str | None = None
+    ) -> dict:
+        """Group understanding + advisory participation gate (v1.6).
+
+        Group → ``{api_version, umo, is_group: True, group, participation,
+        member, degraded}``; private or a disabled ``group`` section →
+        ``{is_group: False/True, isolated: True, ...}`` (empty, fail-closed).
+        ``persona_id`` is accepted for signature symmetry and ignored (groups are
+        never persona- or person-scoped). ``member_id`` only refines the ``member``
+        block. When ``participation.allow`` is true this call **consumes** the
+        advisory slot (cooldown/hourly windows advance); it is the decision
+        endpoint, and repeated calls inside the window report ``cooldown``.
+        """
+        moment = self._clock()
+        base = {
+            "api_version": self.api_version,
+            "umo": umo,
+            "persona_id": None,
+            "is_group": False,
+            "isolated": True,
+            "group": None,
+            "participation": None,
+            "member": None,
+            "degraded": False,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "degraded": True}
+        if not key.is_group:
+            return base
+        try:
+            view = self._group_context(umo, moment, member_id=member_id, stamp=True)
+        except Exception:
+            return {**base, "is_group": True, "degraded": True}
+        if view is None:
+            return {**base, "is_group": True}
+        return view
+
+    # -- growth (v1.6) ------------------------------------------------------
+    async def get_growth_context(self, umo: str, persona_id: str | None = None) -> dict:
+        """Deterministically derived growth for a private scope (v1.6).
+
+        Growth is derived from the **existing ledger** (affinity/stage, emotion
+        events, active days) — zero LLM, zero new ingest. Group scopes, a
+        disabled ``growth`` section and a set ``reset`` all yield the empty
+        rollback shape (``growth=None``, zero drift). ``max_level`` and
+        ``drift_cap`` bound the result; errors degrade instead of raising.
+        """
+        moment = self._clock()
+        base = {
+            "api_version": self.api_version,
+            "umo": umo,
+            "persona_id": None,
+            "is_group": False,
+            "isolated": False,
+            "growth": None,
+            "drift": {"warmth_delta": 0.0, "verbosity_delta": 0.0},
+            "degraded": False,
+        }
+        try:
+            key = parse_umo(umo)
+        except Exception:
+            return {**base, "degraded": True}
+        if key.is_group:
+            return {**base, "is_group": True, "isolated": True}
+        cfg = self._growth_config()
+        if not growth_available(cfg):
+            if cfg.reset:
+                try:
+                    scope, _ = await self._private_scope(key, umo)
+                    resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+                    self._store.clear_growth_state(resolved, scope, now=moment)
+                except Exception:
+                    return {**base, "degraded": True}
+            return base
+        scope, _ = await self._private_scope(key, umo)
+        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+        try:
+            view = self._growth_for(scope, resolved, cfg, moment, persist=True)
+        except Exception:
+            return {**base, "persona_id": resolved, "degraded": True}
+        return {
+            **base,
+            "persona_id": resolved,
+            "growth": view["growth"],
+            "drift": view["drift"],
+        }
 
     # -- life line (v1.4) --------------------------------------------------
     async def get_life_line(self, umo: str, day: str | None = None) -> dict:
@@ -1030,6 +1211,154 @@ class ContractV1:
             return parse_life_line_config(self._config)
         except Exception:
             return LifeLineConfig()
+
+    # -- group / growth internals (v1.6) -----------------------------------
+    def _group_config(self) -> GroupConfig:
+        """Parse the ``group`` group; defaults on any failure (hot-reload safe)."""
+        try:
+            return parse_group_config(self._config)
+        except Exception:
+            return GroupConfig()
+
+    def _growth_config(self) -> GrowthConfig:
+        """Parse the ``growth`` group; defaults on any failure (hot-reload safe)."""
+        try:
+            return parse_growth_config(self._config)
+        except Exception:
+            return GrowthConfig()
+
+    def _group_context(
+        self, umo: str, moment: datetime, *, member_id: str | None = None, stamp: bool = False
+    ) -> dict | None:
+        """Derive the group context (``None`` when the section is disabled).
+
+        When ``stamp`` is true and the gate allows participation, the advisory
+        slot is consumed (cooldown/hourly windows advance). Reads no private
+        state and writes only bounded group aggregates.
+        """
+        cfg = self._group_config()
+        if not cfg.enabled:
+            return None
+        key = parse_umo(umo)
+        hour_key = moment.strftime("%Y-%m-%dT%H")
+        row = self._store.get_group_activity(umo) or {}
+        hour_count = (
+            int(row.get("hour_count") or 0) if row.get("hour_key") == hour_key else 0
+        )
+        part_count = (
+            int(row.get("part_hour_count") or 0)
+            if row.get("part_hour_key") == hour_key
+            else 0
+        )
+        participation = evaluate_participation(
+            now=moment,
+            cfg=cfg,
+            last_participation_ts=row.get("last_participation_ts"),
+            participation_hour_count=part_count,
+            activity_hour_count=hour_count,
+        )
+        if stamp and participation["allow"]:
+            self._store.stamp_group_participation(umo, now=moment)
+            participation = {
+                **participation,
+                "hourly_remaining": max(0, cfg.hourly_limit - (part_count + 1)),
+            }
+        member_key = (
+            member_key_for(key.user_id, member_id)
+            if cfg.member_tracking_enabled
+            else ""
+        )
+        member_row = self._store.get_group_member(umo, member_key) if member_key else None
+        return {
+            "api_version": self.api_version,
+            "umo": umo,
+            "persona_id": None,
+            "is_group": True,
+            "isolated": False,
+            "group": {
+                "member_count": (
+                    self._store.count_group_members(umo)
+                    if cfg.member_tracking_enabled
+                    else 0
+                ),
+                "activity_level": activity_level(hour_count, cfg.busy_group_threshold),
+                "topic": str(row.get("topic") or ""),
+                "topic_age_min": topic_age_min(row.get("topic_ts"), moment),
+                "last_activity": str(row.get("last_activity_ts") or ""),
+            },
+            "participation": participation,
+            "member": {
+                "member_key": member_key,
+                "familiarity": int((member_row or {}).get("familiarity") or 0),
+                "is_known": member_row is not None,
+            },
+            "degraded": False,
+        }
+
+    def _growth_for(
+        self,
+        scope: str,
+        resolved: str,
+        cfg: GrowthConfig,
+        moment: datetime,
+        *,
+        persist: bool,
+    ) -> dict:
+        """Derive ``{growth, drift}`` from the existing ledger.
+
+        ``persist`` writes the level/xp high-water mark (growth never regresses
+        when affinity decays); it is off for the pure-read expression path.
+        """
+        state = self._store.resolve_relationship_state(scope)
+        affinity = float(getattr(state, "affinity", 0.0) or 0.0) if state else 0.0
+        stage = str(getattr(state, "stage", STAGE_STRANGER) or STAGE_STRANGER)
+        active_days = self._store.count_active_days(resolved, scope)
+        since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
+        events = self._store.list_emotion_events(resolved, scope, since_iso=since, limit=200)
+        count = len(events)
+        positive = sum(1 for event in events if float(event.get("delta") or 0.0) > 0)
+        ratio = (positive / count) if count else 0.0
+
+        max_level = max(0, int(cfg.max_level))
+        xp_derived = derive_xp(affinity, active_days, max_level)
+        level_derived, _ = derive_level(affinity, active_days, max_level)
+        stored = self._store.get_growth_state(resolved, scope) or {}
+        stored_level = min(max_level, max(0, int(stored.get("level") or 0)))
+        stored_xp = max(0.0, float(stored.get("xp") or 0.0))
+        level = min(max_level, max(level_derived, stored_level))
+        xp = max(xp_derived, stored_xp)
+        if persist and (level_derived > stored_level or xp_derived > stored_xp):
+            self._store.upsert_growth_state(
+                resolved, scope, level=level_derived, xp=xp_derived, now=moment
+            )
+        if max_level and level >= max_level:
+            progress = 1.0
+        else:
+            progress = round(min(1.0, max(0.0, xp - level)), 4)
+        return {
+            "growth": {
+                "level": level,
+                "progress": progress,
+                "max_level": max_level,
+                "traits": derive_traits(
+                    stage, active_days, ratio, event_count=count
+                ),
+            },
+            "drift": derive_drift(level, max_level, cfg.drift_cap),
+        }
+
+    async def _nudge_warmth_with_growth(
+        self, decision: dict, scope: str, resolved: str, moment: datetime
+    ) -> dict:
+        """Apply the bounded growth drift to ``style_hints.warmth`` (no mode change)."""
+        cfg = self._growth_config()
+        if not growth_available(cfg):
+            return decision
+        try:
+            view = self._growth_for(scope, resolved, cfg, moment, persist=False)
+        except Exception:
+            return decision
+        return with_growth_drift(decision, view["drift"]["warmth_delta"])
 
     def _weather_for(self, cfg: LifeLineConfig):
         """Return the effective weather client (injected wins, else lazy)."""

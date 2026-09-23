@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.5 修订）
+# TCompanion Core — 冻结契约 v1（v1.6 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.5 为纯向后兼容增量**，见 §11/§12/§13/§14/§15/§16）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.5.0`）
+- 契约版本：`api_version = 1`（**v1.6 为纯向后兼容增量**，见 §11–§18）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.6.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -55,6 +55,17 @@
 >    否则整键缺省，输出与 v1.4.0 逐字节一致）；
 > 4. 新增一次性、幂等、可回滚的 `Store.migrate_person_keys`（`POST /person/migrate`
 >    + `/person/migrate/rollback`）；无 schema 变更（仍 `6`）。
+>
+> v1.6 变更摘要（不破坏任何 v1.x 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `group_aware` / `growth`；
+> 2. 新增 `record_group_activity` / `get_group_context` / `get_growth_context`
+>    （同时挂 Star 实例与 `ContractV1`）；
+> 3. `get_proactive_context` **群分支**追加**可选**键 `group` / `participation`
+>    （私聊专属键对群**保持缺席**）；
+> 4. `expression_decision` 私聊叠加**有界**成长漂移（`style_hints["warmth"]`
+>    `+0.00`~`drift_cap`，硬上限 `0.05`，**永不改 `mode`**）；群聊不变；
+> 5. schema 升级到 `7`（三张纯增量新表，见 §7）；关 `group.enabled` /
+>    `growth.enabled` 或置 `growth.reset` → 回落 v1.5.x 行为。
 
 ## 1. 通用约定
 
@@ -83,7 +94,7 @@
 | `plugin` | `str` | 否 | 固定 `astrbot_plugin_tcompanion_core` |
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
-| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` / `memory_bridge` / `life_line` / `identity_binding` |
+| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` / `memory_bridge` / `life_line` / `identity_binding` / `group_aware` / `growth` |
 | `open_thread` | `dict` | 否（v1.2 新增） | 生效后的未完话题配置（默认值已补齐）：`{enabled, max_open, ttl_days, expire_days, followup_max}` |
 
 `capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
@@ -92,7 +103,9 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 只提供输入与回执）；v1.1 追加 `emotion=true` / `expression=true`；v1.2 追加
 `open_threads_followup=true`（下游据此决定是否走未完话题续接链路）；v1.3 追加
 `memory_bridge=true`（装配了可选的只读记忆桥，见 §14；该位表示**能力存在**，
-不表示关联记忆插件已安装——实际可用性由运行时降级决定）。
+不表示关联记忆插件已安装——实际可用性由运行时降级决定）；v1.6 追加
+`group_aware=true` / `growth=true`（群聊理解与成长能力存在，见 §17/§18；实际生效
+仍受各自 `enabled` 开关约束）。
 
 ## 3. `get_life_state(persona_id) -> dict | None`
 
@@ -250,13 +263,14 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 fail-closed 处理。回归由 `tests/test_star_surface.py` 钉住：断言 Star 的公开
 async 面与 `ContractV1` 完全一致。
 
-## 7. SQLite schema（`schema_version = 6`）
+## 7. SQLite schema（`schema_version = 7`）
 
 库文件：`get_astrbot_plugin_data_path()/astrbot_plugin_tcompanion_core/tcompanion_core.sqlite3`。
 
 表：`personas` / `life_state_daily` / `life_schedule` / `relationships` /
 `affinity_ledger` / `interaction_stats` / `open_threads` / `motivation_log` /
-`emotion_events` / `sleep_windows` / `life_events` / `life_diary`
+`emotion_events` / `sleep_windows` / `life_events` / `life_diary` /
+`group_activity` / `group_members` / `growth_state`
 （另有迁移元表 `schema_meta`）。
 
 v2（T2）将关系三表重构为真实模型，键均为 `(persona_id, user_id)`：
@@ -306,11 +320,26 @@ v6（v1.4，Phase 2-D）为**纯增量**：新增三张表，`CREATE TABLE IF NO
   `summary` 为**确定性模板合成**（非用户原文）。
 
 > v1/v2 表仅存派生值、无消息原文，故重构/追加均安全；迁移仍幂等：
-> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v6；
-> 既有 v2/v3/v4/v5 库会安全原地升级到 v6。
+> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v7；
+> 既有 v2–v6 库会安全原地升级到 v7。
 
-**隐私不变式**：以上任何表都不含消息原文/正文列。`life_state_daily.summary`
-为模型生成的当日生活摘要，`open_threads.title` 为话题标题，均非消息原文。
+v7（v1.6，Phase 3-A/3-C）为**纯增量**：新增三张表，`CREATE TABLE IF NOT EXISTS`
++ 索引，**不触碰任何既有表或旧行**，重复执行不报错。旧代码（v1.5.x）不查询新表，
+可安全共存，无需回滚。
+
+- `group_activity(umo, message_count, hour_key, hour_count, day, day_count, topic,
+  topic_ts, last_activity_ts, last_participation_ts, part_hour_key,
+  part_hour_count, updated_at)` —— 每群一行的**有界计数**（时/日活动量、参与闸门
+  窗口、末日活跃）；`topic` 为 `sanitize_thread_title` 清洗后的**短标签**，主键 `umo`。
+- `group_members(umo, member_key, familiarity, msg_count, first_seen_ts,
+  last_seen_ts)` —— 群内**局部**成员熟悉度，主键 `(umo, member_key)`；`member_key`
+  形如 `group:<session_id>#<user_id>`，**不与私聊 `person` 合并、不跨群聚合**。
+- `growth_state(persona_id, user_id, level, xp, reset_at, updated_at)` —— 成长等级
+  高水位（`level`/`xp` 只升不降）与 `reset_at`（清零回退），主键 `(persona_id, user_id)`。
+
+**隐私不变式**：以上任何表都不含消息原文/正文列。`group_activity.topic` 为短标签、
+`life_state_daily.summary` 为模型生成的当日生活摘要、`open_threads.title` 为话题标题，
+均非消息原文。
 
 迁移幂等：`core.db.apply_migrations()` 仅执行 `version > current` 的脚本；
 重复调用不改写 `schema_meta`，`Store.migrate()` 可安全重复执行。
@@ -779,3 +808,113 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 - `Store.migrate_person_keys(...)` / `Store.rollback_person_migration(...)`；Star 面
   `migrate_person(...)` / `rollback_person_migration(...)` 与两条 Web API 路由。
 - **无 schema 变更**（`schema_version` 仍为 `6`）。
+
+## 17. 群聊理解（v1.6 · Phase 3-A）
+
+> 实现：`core/group.py`（纯逻辑）+ `core/store.py`（落库）+ `core/contract.py`（投影）。
+> 契约 `api_version` 仍为 `1`，全部为加法。**群聊只用群的上下文与群内轻量状态**，
+> 绝不读取/注入私聊关系、情绪、生活线或画像，也不跨群聚合。
+
+### 17.1 群/成员派生
+
+- **群内成员为局部匿名键** `group:<session_id>#<member_id>`（`member_key_for`），
+  **不与私聊 `person` 合并、不跨群聚合**；`member_id` 被裁剪为短串。
+- 群派生块：`{member_count, activity_level, topic, topic_age_min, last_activity}`。
+  - `activity_level` ∈ `low|medium|high`，按当前小时消息数与 `busy_group_threshold`
+    分桶（`≥阈值` 为 `high`，`≥阈值/3` 为 `medium`，否则 `low`）。
+  - `topic` 为消费者提交并经 `sanitize_thread_title` 清洗的**短标签**（可缺省），
+    `topic_age_min` 为其距 `now` 的分钟数（无话题为 `null`）；**不存原文**。
+- `member` 块：`{member_key, familiarity, is_known}`；成员跟踪关闭或未提供
+  `member_id` 时 `member_key=""`、`familiarity=0`、`is_known=false`。
+
+### 17.2 参与闸门（advisory，固定理由码）
+
+`evaluate_participation` 按**稳定优先级**给出建议：`cooldown` → `hourly_limit` →
+`group_busy` → `ok`。core 只给建议，**从不自己发送**。
+
+| 字段 | 说明 |
+| --- | --- |
+| `allow` | 是否建议接话 |
+| `reason` | `ok` / `cooldown` / `hourly_limit` / `group_busy`（关闭时为 `disabled`） |
+| `cooldown_remaining_sec` | 距上次接话满 `min_reply_gap_sec`（默认 90s）的剩余秒数 |
+| `hourly_remaining` | 本小时剩余可接话次数（上限 `hourly_limit`，默认 6） |
+
+- 群繁忙：本群当前小时消息数 `≥ busy_group_threshold`（默认 120）→ `group_busy`。
+- **读取即占用**：`get_group_context` 是**决策端点**；当 `allow=true` 时该次调用会
+  **消耗**一个建议槽（推进冷却与小时计数），窗口内重复调用即返回 `cooldown`。
+  `get_proactive_context` 群分支与 `record_group_activity` 只**读取**建议，不占用。
+
+### 17.3 契约增量
+
+- `capabilities["group_aware"] = true`。
+- `record_group_activity(umo, *, member_id=None, topic=None, now=None) -> dict`：
+  仅群范围写有界计数（私聊 no-op `isolated=true`，关闭该组亦 no-op）；返回
+  `{applied, isolated, group, degraded}`（`group` 同 §17.1 派生块）。
+- `get_group_context(umo, persona_id=None, *, member_id=None) -> dict`：
+  - 群：`{api_version, umo, is_group: true, group, participation, member, degraded: false}`；
+  - 私聊：`{is_group: false, isolated: true}`；`group.enabled=false` 时群亦返回
+    `isolated: true` 空结构（fail-closed）。
+- `get_proactive_context` 群分支追加**可选**键 `group` / `participation`（关闭或失败
+  时缺省；私聊专属键对群仍**保持缺席**）。
+
+### 17.4 配置（`group` 组，面向用户）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | 启用群聊理解 |
+| `participation_enabled` | `bool` | `true` | 启用群内参与建议 |
+| `min_reply_gap_sec` | `int` | `90` | 群内最短接话间隔（秒） |
+| `hourly_limit` | `int` | `6` | 每小时最多接话次数 |
+| `busy_group_threshold` | `int` | `120` | 群繁忙判定（条/小时） |
+| `member_tracking_enabled` | `bool` | `true` | 记录群成员熟悉度 |
+
+### 17.5 边界与隐私
+
+- **群聊绝不泄露**私聊 `relationship` / `emotion_state` / `life_detail` /
+  `memory(profile)` / `person_id`；这些键对群**保持缺席**。
+- `group.enabled=false` → `get_group_context` / `record_group_activity` 均为空
+  (`isolated=true`)，`get_proactive_context` 群分支不带 `group`/`participation`，
+  行为同 v1.5.x。数据源异常 → 该能力缺省，不抛错。
+
+## 18. 成长（v1.6 · Phase 3-C，轻量）
+
+> 实现：`core/growth.py`（纯逻辑）+ `core/store.py`（高水位）+ `core/contract.py`（投影）。
+> **由既有账本确定性派生**（affinity/stage、情绪事件、活跃天数），**零 LLM、零新
+> ingest**；契约 `api_version` 仍为 `1`，全部为加法。
+
+### 18.1 派生规则（确定性、有界）
+
+- `xp = clamp01(affinity) * max_level + min(1, active_days / 30)`（`derive_xp`）；
+  `level = min(max_level, floor(xp))`，`progress = xp - level`（满级为 `1.0`）。
+- `traits`：由阶段/活跃天数/正向事件比例派生的**短标签**（如 `熟悉`/`亲近`/`常来`/
+  `熟客`/`开朗`），最多少量、无原文。
+- `drift = {warmth_delta, verbosity_delta}`：`warmth_delta = drift_cap * level/max_level`，
+  `verbosity_delta = 0.5 * warmth_delta`；`drift_cap` 硬上限 `0.05`。
+- **高水位**：`growth_state.level`/`xp` 只升不降（好感衰减不致回退），读路径幂等写回。
+
+### 18.2 契约增量
+
+- `capabilities["growth"] = true`。
+- `get_growth_context(umo, persona_id=None) -> dict`：
+  - 私聊：`{api_version, umo, persona_id, is_group: false, isolated: false,
+    growth: {level, progress, max_level, traits}, drift: {warmth_delta,
+    verbosity_delta}, degraded: false}`；
+  - 群 → `isolated: true` 空（`growth=null`，零漂移）；`growth.enabled=false` 或
+    `reset=true` → 空结构（`growth=null`，零漂移），`reset` 同时清零存储。
+- `expression_decision`：私聊在记忆微调之后叠加**有界**成长漂移，仅上调
+  `style_hints["warmth"]`（`+0.00`~`drift_cap`，封顶 `1.0`），**永不改变 `mode`**；
+  群聊不变。`growth` 关闭或 `reset` 时不产生任何漂移（回落 v1.5.x 表达）。
+
+### 18.3 配置（`growth` 组，面向用户）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `true` | 启用成长 |
+| `max_level` | `int` | `10` | 成长等级上限 |
+| `drift_cap` | `float` | `0.05` | 表达暖度提升上限（`0`~`0.05`） |
+| `reset` | `bool` | `false` | 清零成长并回落既有行为 |
+
+### 18.4 边界
+
+- 群聊无成长（`isolated` 空）；成长**不引入**新表以外的写入、不新增 LLM 调用、
+  不存原文。能力缺失/异常 → 该能力缺省，行为同 v1.5.x，不抛错。

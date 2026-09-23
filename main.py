@@ -214,6 +214,28 @@ class TCompanionCore(Star):
     async def expression_decision(self, umo: str, persona_id: str | None = None) -> dict:
         return await self._contract().expression_decision(umo, persona_id)
 
+    async def record_group_activity(
+        self,
+        umo: str,
+        *,
+        member_id: str | None = None,
+        topic: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        return await self._contract().record_group_activity(
+            umo, member_id=member_id, topic=topic, now=now
+        )
+
+    async def get_group_context(
+        self, umo: str, persona_id: str | None = None, *, member_id: str | None = None
+    ) -> dict:
+        return await self._contract().get_group_context(
+            umo, persona_id, member_id=member_id
+        )
+
+    async def get_growth_context(self, umo: str, persona_id: str | None = None) -> dict:
+        return await self._contract().get_growth_context(umo, persona_id)
+
     async def get_life_line(self, umo: str, day: str | None = None) -> dict:
         return await self._contract().get_life_line(umo, day=day)
 

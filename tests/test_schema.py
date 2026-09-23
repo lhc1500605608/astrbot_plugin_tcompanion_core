@@ -139,7 +139,7 @@ def test_v5_migration_is_idempotent(tmp_path):
 
 # -- schema v6 (life line) ------------------------------------------------
 def test_schema_v6_life_line_tables(store):
-    assert store.schema_version == schema.SCHEMA_VERSION == 6
+    assert schema.SCHEMA_VERSION >= 6
     assert {"sleep_windows", "life_events", "life_diary"} <= store.table_names()
 
 
@@ -157,7 +157,7 @@ def test_migrate_v5_to_v6_in_place_preserves_and_adds(tmp_path):
         )
         conn.commit()
 
-        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 6
+        assert schema.apply_migrations(conn, target=6) == 6
         row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
         assert row["title"] == "旧话题"
         assert row["status"] == "open"
@@ -167,7 +167,41 @@ def test_migrate_v5_to_v6_in_place_preserves_and_adds(tmp_path):
         # re-running is a no-op and never touches existing rows
         for _ in range(3):
             schema._migrate_v6(conn)
-        assert schema.apply_migrations(conn) == 6
+        assert schema.apply_migrations(conn, target=6) == 6
+        assert conn.execute("SELECT COUNT(*) FROM open_threads").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+# -- schema v7 (group + growth) -------------------------------------------
+def test_schema_v7_group_and_growth_tables(store):
+    assert store.schema_version == schema.SCHEMA_VERSION == 7
+    assert {"group_activity", "group_members", "growth_state"} <= store.table_names()
+
+
+def test_migrate_v6_to_v7_in_place_preserves_and_adds(tmp_path):
+    """Old v6 rows survive; the three new tables start empty; idempotent."""
+    db_file = tmp_path / "v6.sqlite3"
+    conn = schema.connect(str(db_file))
+    try:
+        assert schema.apply_migrations(conn, target=6) == 6
+        conn.execute(
+            "INSERT INTO open_threads "
+            "(thread_id, umo, persona_id, title, status, opened_at, updated_at) "
+            "VALUES ('legacy', 'umo://u', 'p1', '旧话题', 'open', "
+            "'2026-09-10T10:00:00+00:00', '2026-09-11T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 7
+        row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
+        assert row["title"] == "旧话题"
+        for table in ("group_activity", "group_members", "growth_state"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+        for _ in range(3):
+            schema._migrate_v7(conn)
+        assert schema.apply_migrations(conn) == 7
         assert conn.execute("SELECT COUNT(*) FROM open_threads").fetchone()[0] == 1
     finally:
         conn.close()

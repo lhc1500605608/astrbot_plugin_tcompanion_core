@@ -41,6 +41,9 @@ CONTRACT_METHODS = frozenset(
         "get_open_threads",
         "close_open_thread",
         "mark_thread_followup",
+        "record_group_activity",
+        "get_group_context",
+        "get_growth_context",
     }
 )
 

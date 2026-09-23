@@ -257,5 +257,79 @@
         "default": 45
       }
     }
+  },
+  "group": {
+    "type": "object",
+    "description": "群聊",
+    "hint": "让机器人在群里懂得分寸：了解群氛围，并按频率限制决定是否接话。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用群聊理解",
+        "hint": "关闭后不记录群活动，也不提供群内参与建议。",
+        "default": true
+      },
+      "participation_enabled": {
+        "type": "bool",
+        "description": "启用群内参与建议",
+        "hint": "关闭后仍了解群氛围，但不再建议是否接话。",
+        "default": true
+      },
+      "min_reply_gap_sec": {
+        "type": "int",
+        "description": "群内最短接话间隔（秒）",
+        "hint": "两次接话至少间隔这么久，默认 90 秒。",
+        "default": 90
+      },
+      "hourly_limit": {
+        "type": "int",
+        "description": "每小时最多接话次数",
+        "hint": "每个群每小时最多主动接话几次，默认 6 次。",
+        "default": 6
+      },
+      "busy_group_threshold": {
+        "type": "int",
+        "description": "群繁忙判定（条/小时）",
+        "hint": "群里每小时消息超过该值时暂不接话，默认 120 条。",
+        "default": 120
+      },
+      "member_tracking_enabled": {
+        "type": "bool",
+        "description": "记录群成员熟悉度",
+        "hint": "关闭后不记录成员维度，仅保留群整体活跃度。",
+        "default": true
+      }
+    }
+  },
+  "growth": {
+    "type": "object",
+    "description": "成长",
+    "hint": "随相处时间与互动，表达逐渐更亲近；有上限，可清零。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用成长",
+        "hint": "关闭后不再体现成长变化，行为回到未开启时的状态。",
+        "default": true
+      },
+      "max_level": {
+        "type": "int",
+        "description": "成长等级上限",
+        "hint": "可达到的最高等级，默认 10。",
+        "default": 10
+      },
+      "drift_cap": {
+        "type": "float",
+        "description": "表达暖度提升上限",
+        "hint": "成长最多让表达暖度提高多少，范围 0~0.05，默认 0.05。",
+        "default": 0.05
+      },
+      "reset": {
+        "type": "bool",
+        "description": "清零成长",
+        "hint": "开启后清除已积累的成长，回到初始状态。",
+        "default": false
+      }
+    }
   }
 }

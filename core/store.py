@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import db as schema
 from .emotion import apply_emotion_affinity_delta, cap_emotion_delta
+from .group import GROUP_MEMBER_FAMILIARITY_MAX
 from .life_state import WeeklySchedule
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
@@ -1232,6 +1233,246 @@ class Store:
             )
             self._conn.commit()
         return cursor.rowcount > 0
+
+    # -- group understanding (v1.6) ---------------------------------------
+    def get_group_activity(self, umo: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM group_activity WHERE umo = ?", (umo,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def bump_group_activity(
+        self, umo: str, *, topic: str | None = None, now: datetime | None = None
+    ) -> dict:
+        """Bump the bounded hourly/day activity counters for one group.
+
+        Only counts, timestamps and an optional sanitized short ``topic`` label
+        are written — never message text. Hourly/day counters are keyed by the
+        clock bucket so a new bucket starts at ``1``.
+        """
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        hour_key = moment.strftime("%Y-%m-%dT%H")
+        day = moment.date().isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM group_activity WHERE umo = ?", (umo,)
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO group_activity
+                        (umo, message_count, hour_key, hour_count, day, day_count,
+                         topic, topic_ts, last_activity_ts, updated_at)
+                    VALUES (?, 1, ?, 1, ?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        umo,
+                        hour_key,
+                        day,
+                        topic or "",
+                        stamp if topic else "",
+                        stamp,
+                        stamp,
+                    ),
+                )
+            else:
+                hour_count = (
+                    int(row["hour_count"] or 0) + 1
+                    if row["hour_key"] == hour_key
+                    else 1
+                )
+                day_count = (
+                    int(row["day_count"] or 0) + 1 if row["day"] == day else 1
+                )
+                topic_value = row["topic"] or ""
+                topic_ts = row["topic_ts"] or ""
+                if topic:
+                    topic_value = topic
+                    topic_ts = stamp
+                self._conn.execute(
+                    """
+                    UPDATE group_activity SET
+                        message_count = message_count + 1,
+                        hour_key = ?, hour_count = ?, day = ?, day_count = ?,
+                        topic = ?, topic_ts = ?,
+                        last_activity_ts = ?, updated_at = ?
+                    WHERE umo = ?
+                    """,
+                    (
+                        hour_key,
+                        hour_count,
+                        day,
+                        day_count,
+                        topic_value,
+                        topic_ts,
+                        stamp,
+                        stamp,
+                        umo,
+                    ),
+                )
+            self._conn.commit()
+        return self.get_group_activity(umo) or {}
+
+    def stamp_group_participation(
+        self, umo: str, *, now: datetime | None = None
+    ) -> dict:
+        """Record one granted participation slot (cooldown + hourly bucket)."""
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        hour_key = moment.strftime("%Y-%m-%dT%H")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM group_activity WHERE umo = ?", (umo,)
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO group_activity
+                        (umo, last_participation_ts, part_hour_key,
+                         part_hour_count, updated_at)
+                    VALUES (?, ?, ?, 1, ?)
+                    """,
+                    (umo, stamp, hour_key, stamp),
+                )
+            else:
+                part_count = (
+                    int(row["part_hour_count"] or 0) + 1
+                    if row["part_hour_key"] == hour_key
+                    else 1
+                )
+                self._conn.execute(
+                    """
+                    UPDATE group_activity SET
+                        last_participation_ts = ?, part_hour_key = ?,
+                        part_hour_count = ?, updated_at = ?
+                    WHERE umo = ?
+                    """,
+                    (stamp, hour_key, part_count, stamp, umo),
+                )
+            self._conn.commit()
+        return self.get_group_activity(umo) or {}
+
+    def bump_group_member(
+        self, umo: str, member_key: str, *, now: datetime | None = None
+    ) -> dict:
+        """Bump a bounded per-member familiarity counter (no raw text)."""
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO group_members
+                    (umo, member_key, familiarity, msg_count,
+                     first_seen_ts, last_seen_ts)
+                VALUES (?, ?, 1, 1, ?, ?)
+                ON CONFLICT(umo, member_key) DO UPDATE SET
+                    familiarity = MIN(?, group_members.familiarity + 1),
+                    msg_count = group_members.msg_count + 1,
+                    last_seen_ts = excluded.last_seen_ts
+                """,
+                (
+                    umo,
+                    member_key,
+                    stamp,
+                    stamp,
+                    GROUP_MEMBER_FAMILIARITY_MAX,
+                ),
+            )
+            self._conn.commit()
+        return self.get_group_member(umo, member_key) or {}
+
+    def get_group_member(self, umo: str, member_key: str) -> dict | None:
+        if not member_key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM group_members WHERE umo = ? AND member_key = ?",
+                (umo, member_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_group_members(self, umo: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM group_members WHERE umo = ?", (umo,)
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    # -- growth state (v1.6) ----------------------------------------------
+    def get_growth_state(self, persona_id: str, user_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM growth_state WHERE persona_id = ? AND user_id = ?",
+                (persona_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_growth_state(
+        self,
+        persona_id: str,
+        user_id: str,
+        *,
+        level: int,
+        xp: float,
+        now: datetime | None = None,
+    ) -> dict:
+        """Persist the growth high-water mark (level/xp never decrease here)."""
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO growth_state (persona_id, user_id, level, xp, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(persona_id, user_id) DO UPDATE SET
+                    level = MAX(growth_state.level, excluded.level),
+                    xp = MAX(growth_state.xp, excluded.xp),
+                    updated_at = excluded.updated_at
+                """,
+                (persona_id, user_id, max(0, int(level)), float(xp), stamp),
+            )
+            self._conn.commit()
+        return self.get_growth_state(persona_id, user_id) or {}
+
+    def clear_growth_state(
+        self, persona_id: str, user_id: str, *, now: datetime | None = None
+    ) -> dict:
+        """Zero the stored growth and stamp ``reset_at`` (rollback)."""
+        moment = now or _utcnow()
+        stamp = moment.isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO growth_state
+                    (persona_id, user_id, level, xp, reset_at, updated_at)
+                VALUES (?, ?, 0, 0.0, ?, ?)
+                ON CONFLICT(persona_id, user_id) DO UPDATE SET
+                    level = 0, xp = 0.0, reset_at = excluded.reset_at,
+                    updated_at = excluded.updated_at
+                """,
+                (persona_id, user_id, stamp, stamp),
+            )
+            self._conn.commit()
+        return self.get_growth_state(persona_id, user_id) or {}
+
+    def count_active_days(self, persona_id: str, user_id: str) -> int:
+        """Distinct days with any recorded interaction for a private scope."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT day FROM affinity_ledger
+                     WHERE persona_id = ? AND user_id = ?
+                    UNION
+                    SELECT DISTINCT day FROM emotion_events
+                     WHERE persona_id = ? AND user_id = ?
+                )
+                """,
+                (persona_id, user_id, persona_id, user_id),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     # -- person-key migration (v1.5) ---------------------------------------
     def migrate_person_keys(

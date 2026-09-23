@@ -7,6 +7,11 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import json_response
 
+try:  # pragma: no cover - older AstrBot / the off-device test stub
+    from astrbot.api.web import request as _web_request
+except Exception:  # pragma: no cover
+    _web_request = None
+
 from .core.contract import PLUGIN_NAME, PLUGIN_VERSION, ContractV1
 from .core.emotion import VALENCE_WINDOW_HOURS, emotion_snapshot, expression_for
 from .core.memory_bridge import MemoryBridge
@@ -58,6 +63,24 @@ class TCompanionCore(Star):
             self.api_emotion_state,
             ["GET"],
             "Derived emotion state / expression mode per relationship (read-only)",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/person/keys",
+            self.api_person_keys,
+            ["GET"],
+            "Distinct private (persona_id, user_id) keys seen in the store (read-only)",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/person/migrate",
+            self.api_person_migrate,
+            ["POST"],
+            "One-time merge of per-adapter private rows onto a Person key",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/person/migrate/rollback",
+            self.api_person_migrate_rollback,
+            ["POST"],
+            "Roll back the latest Person-key migration from its JSON backup",
         )
 
     async def initialize(self):
@@ -197,6 +220,26 @@ class TCompanionCore(Star):
     async def get_diary(self, umo: str, day: str | None = None) -> dict | None:
         return await self._contract().get_diary(umo, day=day)
 
+    async def migrate_person(
+        self,
+        person_id: str,
+        aliases: list[str] | None = None,
+        *,
+        backup_dir: str | None = None,
+    ) -> dict:
+        """One-time merge of per-adapter private keys onto a Person key (v1.5)."""
+        if self._store is None:
+            return {"ok": False, "reason": "store_not_ready"}
+        return self._store.migrate_person_keys(
+            person_id, aliases or [], backup_dir=backup_dir
+        )
+
+    async def rollback_person_migration(self, backup_path: str | None = None) -> dict:
+        """Restore the pre-migration rows from a migration JSON backup (v1.5)."""
+        if self._store is None:
+            return {"ok": False, "reason": "store_not_ready"}
+        return self._store.rollback_person_migration(backup_path)
+
     # -- Web API handlers (read-only panel) --------------------------------
     async def api_life_state(self):
         if self._store is None:
@@ -253,6 +296,46 @@ class TCompanionCore(Star):
                 }
             )
         return json_response({"items": items})
+
+    async def _json_body(self) -> dict:
+        if _web_request is None:
+            return {}
+        try:
+            body = await _web_request.json(default={})
+        except Exception:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def api_person_keys(self):
+        """Read-only list of legacy private keys, to pick migration aliases."""
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        return json_response({"items": self._store.list_person_key_candidates()})
+
+    async def api_person_migrate(self):
+        """POST body ``{person_id, aliases[]}`` → idempotent merge (+ backup)."""
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        body = await self._json_body()
+        person_id = str(body.get("person_id") or "").strip()
+        aliases = body.get("aliases") or body.get("adapter_user_ids") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not person_id or not isinstance(aliases, (list, tuple)):
+            return json_response(
+                {"ok": False, "reason": "invalid_args"}, status_code=400
+            )
+        result = await self.migrate_person(person_id, list(aliases))
+        return json_response(result, status_code=200 if result.get("ok") else 400)
+
+    async def api_person_migrate_rollback(self):
+        """POST body ``{backup_path?}`` → restore the pre-migration rows."""
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        body = await self._json_body()
+        backup_path = str(body.get("backup_path") or "").strip() or None
+        result = await self.rollback_person_migration(backup_path)
+        return json_response(result, status_code=200 if result.get("ok") else 400)
 
     async def terminate(self):
         if self._store is not None:

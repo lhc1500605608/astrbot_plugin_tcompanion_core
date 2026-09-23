@@ -58,7 +58,7 @@ from .weather import WeatherClient
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.5.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -175,6 +175,8 @@ class ContractV1:
                 "memory_bridge": True,
                 # additive v1.4 key (Phase 2-D); the map shape stays dict[str, bool]
                 "life_line": True,
+                # additive v1.5 key; the map shape stays dict[str, bool]
+                "identity_binding": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -212,7 +214,7 @@ class ContractV1:
         """Return the frozen v1 relationship structure for ``umo``.
 
         Pure read (no writes). Group sessions are isolated and never inherit a
-        private ``(persona_id, user_id)`` relationship; those return the
+        private ``(persona_id, person_id)`` relationship; those return the
         neutral default with ``degraded=True``.
         """
         if not umo:
@@ -221,7 +223,10 @@ class ContractV1:
             key = parse_umo(umo)
             if key.is_group:
                 return self._relationship_view(umo, persona_id, STAGE_STRANGER, 0.0, False, True)
-            state = self._store.resolve_relationship_state(key.user_id, persona_id)
+            scope, _ = await self._private_scope(key, umo)
+            state = self._store.resolve_relationship_state(scope, persona_id)
+            if state is None:
+                state = self._store.resolve_relationship_state(key.user_id, persona_id)
         except Exception:
             state = None
         if state is None:
@@ -269,14 +274,22 @@ class ContractV1:
         for private scopes — absent when the section is disabled or isolated —
         and may report ``quota.allow=false`` +
         ``motivation.blocked_reason="quiet_hours"`` during quiet hours.
+        v1.5 adds the optional ``person_id`` echo for private scopes (the
+        authoritative Person the relationship/emotion/life line is keyed by);
+        it is omitted when the identity bridge cannot resolve one, in which
+        case the key is ``parse_umo().user_id`` (v1.4.0 behaviour).
         """
         moment = self._clock()
         degraded = False
 
+        person_id = ""
         try:
             key = parse_umo(umo)
             is_group = key.is_group
-            user_id = key.user_id
+            if is_group:
+                user_id = key.user_id
+            else:
+                user_id, person_id = await self._private_scope(key, umo)
         except Exception:
             is_group = True
             user_id = ""
@@ -286,6 +299,8 @@ class ContractV1:
         if not is_group and resolved_persona is None:
             try:
                 state = self._store.resolve_relationship_state(user_id)
+                if state is None and person_id:
+                    state = self._store.resolve_relationship_state(key.user_id)
                 if state is not None:
                     resolved_persona = state.persona_id
             except Exception:
@@ -493,6 +508,11 @@ class ContractV1:
             "expression": expression,
             "degraded": degraded,
         }
+        # Optional v1.5 key: the resolved Person identity (private only, echoed
+        # back). Absent for group scopes and when the bridge cannot resolve one
+        # (then the output stays byte-identical to v1.4.0).
+        if person_id:
+            result["person_id"] = person_id
         # Optional v1.4 key: present only for an enabled private life line
         # (absent when disabled, for group scopes, or on failure).
         if life_detail is not None:
@@ -516,7 +536,7 @@ class ContractV1:
     ) -> dict:
         """Record a proactive outcome receipt; update streak/ledger.
 
-        Idempotent: the receipt is deduplicated per ``(persona_id, user_id)``
+        Idempotent: the receipt is deduplicated per ``(persona_id, person_id)``
         by ``event_id`` or, when omitted, by a deterministic
         ``day|sent|reason_code|replied`` bucket. Replays never double-count the
         streak or affinity ledger. Group scopes are isolated and left untouched.
@@ -534,13 +554,8 @@ class ContractV1:
                 "reason": "group_isolated",
             }
 
-        resolved = persona_id
-        if resolved is None:
-            try:
-                state = self._store.resolve_relationship_state(key.user_id)
-                resolved = state.persona_id if state is not None else DEFAULT_PERSONA_ID
-            except Exception:
-                resolved = DEFAULT_PERSONA_ID
+        scope, _ = await self._private_scope(key, umo)
+        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
 
         receipt_key = event_id or (
             f"{moment.date().isoformat()}|{int(bool(sent))}|{reason_code}|{int(bool(replied))}"
@@ -548,7 +563,7 @@ class ContractV1:
         receipt = self._store.log_motivation(
             persona_id=resolved,
             umo=umo,
-            user_id=key.user_id,
+            user_id=scope,
             kind="proactive_outcome",
             reason=reason_code,
             selected_reason=reason_code,
@@ -559,7 +574,7 @@ class ContractV1:
             now=moment,
         )
         if receipt.get("duplicate"):
-            dynamics = self._store.get_interaction_dynamics(resolved, key.user_id)
+            dynamics = self._store.get_interaction_dynamics(resolved, scope)
             return {
                 "applied": False,
                 "duplicate": True,
@@ -568,7 +583,7 @@ class ContractV1:
             }
 
         dynamics = self._store.record_proactive_outcome(
-            resolved, key.user_id, sent=bool(sent), replied=bool(replied), now=moment
+            resolved, scope, sent=bool(sent), replied=bool(replied), now=moment
         )
         return {
             "applied": True,
@@ -622,7 +637,8 @@ class ContractV1:
         if not cleaned:
             return {**base, "reason": "empty_label", "degraded": True}
 
-        resolved = self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = self._resolve_persona(scope, legacy=key.user_id)
         thread_id = thread_id_for(kind, cleaned, dedupe_key=dedupe_key)
         try:
             row = self._store.upsert_open_thread(
@@ -669,7 +685,11 @@ class ContractV1:
         cfg = self._open_thread_config()
         if not cfg.enabled:
             return []
-        resolved = persona_id or self._resolve_persona(key.user_id)
+        if persona_id:
+            resolved = persona_id
+        else:
+            scope, _ = await self._private_scope(key, umo)
+            resolved = self._resolve_persona(scope, legacy=key.user_id)
         self._advance_open_thread_lifecycle(self._clock(), cfg)
         try:
             rows = self._store.list_open_thread_details(
@@ -784,12 +804,13 @@ class ContractV1:
         if event_type not in EVENT_TYPES:
             return {**base, "reason": "unknown_event_type", "degraded": True}
 
-        resolved = self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = self._resolve_persona(scope, legacy=key.user_id)
         receipt_key = dedupe_key or f"{moment.date().isoformat()}|{event_type}"
         try:
             result = self._store.apply_emotion_event(
                 resolved,
-                key.user_id,
+                scope,
                 event_id=receipt_key,
                 event_type=event_type,
                 delta=event_delta(event_type),
@@ -833,14 +854,15 @@ class ContractV1:
         if key.is_group:
             return self._degraded_emotion_context(moment)
 
-        resolved = persona_id or self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
         try:
             since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
             rows = self._store.list_emotion_events(
-                resolved or "", key.user_id, since_iso=since, limit=200
+                resolved or "", scope, since_iso=since, limit=200
             )
             streak = self._store.get_interaction_dynamics(
-                resolved or "", key.user_id
+                resolved or "", scope
             ).unanswered_streak
             snapshot = emotion_snapshot(rows, now=moment, unanswered_streak=streak)
         except Exception:
@@ -865,14 +887,15 @@ class ContractV1:
         if key.is_group:
             return self._expression_payload(expression_for(stage=STAGE_STRANGER, is_group=True))
 
-        resolved = persona_id or self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
         try:
             since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
             rows = self._store.list_emotion_events(
-                resolved or "", key.user_id, since_iso=since, limit=200
+                resolved or "", scope, since_iso=since, limit=200
             )
             streak = self._store.get_interaction_dynamics(
-                resolved or "", key.user_id
+                resolved or "", scope
             ).unanswered_streak
             snapshot = emotion_snapshot(rows, now=moment, unanswered_streak=streak)
             rel = await self.get_relationship(umo, resolved)
@@ -926,9 +949,10 @@ class ContractV1:
         cfg = self._life_line_config()
         if not cfg.enabled:
             return base
-        resolved = self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = self._resolve_persona(scope, legacy=key.user_id)
         try:
-            detail = await self._life_detail(resolved, key.user_id, moment, cfg, day=target_day)
+            detail = await self._life_detail(resolved, scope, moment, cfg, day=target_day)
         except Exception:
             return {**base, "persona_id": resolved, "degraded": True}
         return {
@@ -959,9 +983,10 @@ class ContractV1:
             return None
         moment = self._clock()
         target_day = day or moment.date().isoformat()
-        resolved = self._resolve_persona(key.user_id)
+        scope, _ = await self._private_scope(key, umo)
+        resolved = self._resolve_persona(scope, legacy=key.user_id)
         try:
-            return self._ensure_diary(resolved, key.user_id, target_day, cfg)
+            return self._ensure_diary(resolved, scope, target_day, cfg)
         except Exception:
             return None
 
@@ -1316,13 +1341,40 @@ class ContractV1:
         hints["warmth"] = round(min(base + MEMORY_WARMTH_MAX_DELTA, base + MEMORY_WARMTH_STEP), 4)
         return {**decision, "style_hints": hints}
 
-    def _resolve_persona(self, user_id: str) -> str:
-        """Resolve the persona owning ``user_id`` (falls back to default)."""
-        try:
-            state = self._store.resolve_relationship_state(user_id)
-            return state.persona_id if state is not None else DEFAULT_PERSONA_ID
-        except Exception:
-            return DEFAULT_PERSONA_ID
+    async def _private_scope(self, key, umo: str) -> tuple[str, str]:
+        """Resolve ``(scope_key, person_id)`` for a private scope (v1.5).
+
+        The scope key is what the store is keyed by: the authoritative
+        ``person_id`` from the memory bridge when it resolves one, else the
+        ``parse_umo().user_id`` fallback (v1.4.0 behaviour). Fail-closed: any
+        bridge error/absence simply yields the fallback key, and ``person_id``
+        is ``""``. Group scopes must not call this (they keep ``group:<session>``).
+        """
+        person_id = ""
+        bridge = self._memory_bridge
+        if bridge is not None:
+            try:
+                person_id = await bridge.resolve_person(umo) or ""
+            except Exception:
+                person_id = ""
+        return (person_id or key.user_id), person_id
+
+    def _resolve_persona(self, scope: str, legacy: str = "") -> str:
+        """Resolve the persona owning ``scope`` (falls back to default).
+
+        ``legacy`` is the pre-v1.5 (``parse_umo``) key, tried second so a row
+        that predates the identity migration is still found.
+        """
+        for candidate in (scope, legacy):
+            if not candidate:
+                continue
+            try:
+                state = self._store.resolve_relationship_state(candidate)
+            except Exception:
+                continue
+            if state is not None and state.persona_id:
+                return state.persona_id
+        return DEFAULT_PERSONA_ID
 
     @staticmethod
     def _thread_view(row: dict) -> dict:

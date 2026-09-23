@@ -33,6 +33,32 @@ from .relationship import (
     stage_for,
 )
 
+#: Tables whose private rows are keyed by ``(persona_id, user_id)`` and are
+#: migrated to the authoritative ``person_id`` (v1.5). ``life_state_daily`` /
+#: ``life_schedule`` are persona-scoped (no person key) and ``open_threads`` is
+#: keyed by ``umo`` — none of them migrate.
+PERSON_MIGRATE_TABLES: tuple[str, ...] = (
+    "relationships",
+    "interaction_stats",
+    "emotion_events",
+    "affinity_ledger",
+    "motivation_log",
+    "sleep_windows",
+    "life_events",
+    "life_diary",
+)
+
+#: Row-identity columns per table (besides ``persona_id`` / ``user_id``); used
+#: to detect a conflict when an alias row is re-keyed onto the person key.
+PERSON_MIGRATE_ROW_KEYS: dict[str, tuple[str, ...]] = {
+    "emotion_events": ("dedupe_key",),
+    "affinity_ledger": ("event_id",),
+    "motivation_log": ("entry_id",),
+    "sleep_windows": ("day",),
+    "life_events": ("dedupe_key",),
+    "life_diary": ("day",),
+}
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -1206,6 +1232,355 @@ class Store:
             )
             self._conn.commit()
         return cursor.rowcount > 0
+
+    # -- person-key migration (v1.5) ---------------------------------------
+    def migrate_person_keys(
+        self,
+        person_id: str,
+        aliases: Sequence[str],
+        *,
+        backup_dir: str | Path | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """Merge per-adapter private rows into ``(persona_id, person_id)``.
+
+        One-time, idempotent and reversible. Every affected row (the aliases and
+        the target key) is written to a JSON backup *before* any change; alias
+        rows are then merged into the canonical person key. A second call is a
+        no-op (no alias rows remain) and group rows (``group:*``) are never
+        touched. Returns per-table counts plus the backup path.
+        """
+        moment = now or _utcnow()
+        person_id = str(person_id or "").strip()
+        alias_list = sorted(
+            {
+                str(alias).strip()
+                for alias in (aliases or ())
+                if str(alias or "").strip()
+                and str(alias).strip() != person_id
+                and not str(alias).strip().startswith("group:")
+            }
+        )
+        base = {
+            "ok": True,
+            "person_id": person_id,
+            "aliases": alias_list,
+            "backup_path": None,
+            "merged": {},
+            "noop": False,
+        }
+        if not person_id or not alias_list:
+            return {**base, "ok": False, "reason": "invalid_args"}
+
+        alias_set = set(alias_list)
+        with self._lock:
+            rows = self._person_snapshot_locked(person_id, alias_list)
+            has_alias_rows = any(
+                str(row.get("user_id")) in alias_set
+                for table_rows in rows.values()
+                for row in table_rows
+            )
+            if not has_alias_rows:
+                # Surface the exact legacy keys so an operator can correct the
+                # aliases (they are ``parse_umo().user_id`` values, not tmemory
+                # canonicals).
+                return {
+                    **base,
+                    "noop": True,
+                    "available_keys": self.list_person_key_candidates(50),
+                }
+            backup = {
+                "version": 1,
+                "created_at": moment.isoformat(),
+                "person_id": person_id,
+                "aliases": alias_list,
+                "tables": rows,
+            }
+            backup_path = self._write_migration_backup(backup, person_id, moment, backup_dir)
+            merged = {
+                "relationships": self._merge_relationships_locked(person_id, alias_list),
+                "interaction_stats": self._merge_stats_locked(person_id, alias_list),
+                "emotion_events": self._rekey_rows_locked("emotion_events", person_id, alias_list),
+                "affinity_ledger": self._rekey_rows_locked(
+                    "affinity_ledger", person_id, alias_list
+                ),
+                "motivation_log": self._rekey_rows_locked("motivation_log", person_id, alias_list),
+                "sleep_windows": self._rekey_rows_locked("sleep_windows", person_id, alias_list),
+                "life_events": self._rekey_rows_locked("life_events", person_id, alias_list),
+                "life_diary": self._rekey_rows_locked("life_diary", person_id, alias_list),
+            }
+            self._conn.commit()
+        return {**base, "backup_path": str(backup_path), "merged": merged}
+
+    def rollback_person_migration(self, backup_path: str | Path | None = None) -> dict:
+        """Undo a person migration from its JSON backup (latest when omitted)."""
+        path = (
+            Path(backup_path)
+            if backup_path is not None
+            else self.latest_migration_backup()
+        )
+        if path is None:
+            return {"ok": False, "reason": "no_backup", "backup_path": None, "restored": {}}
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {
+                "ok": False,
+                "reason": "unreadable_backup",
+                "backup_path": str(path),
+                "restored": {},
+            }
+        person_id = str(data.get("person_id") or "").strip()
+        aliases = [str(alias) for alias in (data.get("aliases") or ())]
+        keys = [key for key in (person_id, *aliases) if key]
+        tables = data.get("tables") if isinstance(data.get("tables"), dict) else {}
+        restored: dict[str, int] = {}
+        with self._lock:
+            for table, rows in tables.items():
+                if table not in PERSON_MIGRATE_TABLES:
+                    continue
+                for key in keys:
+                    self._conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (key,))
+                for row in rows or ():
+                    if not isinstance(row, dict) or not row:
+                        continue
+                    columns = list(row.keys())
+                    placeholders = ", ".join("?" for _ in columns)
+                    self._conn.execute(
+                        f"INSERT OR IGNORE INTO {table} ({', '.join(columns)}) "
+                        f"VALUES ({placeholders})",
+                        tuple(row[column] for column in columns),
+                    )
+                restored[table] = len(rows or ())
+            self._conn.commit()
+        return {
+            "ok": True,
+            "backup_path": str(path),
+            "person_id": person_id,
+            "restored": restored,
+        }
+
+    def list_person_key_candidates(self, limit: int = 100) -> list[dict]:
+        """Distinct private ``(persona_id, user_id)`` keys seen in the store.
+
+        Helps an operator pick the legacy keys to pass to
+        :meth:`migrate_person_keys` (group keys are excluded). Read-only.
+        """
+        seen: set[tuple[str, str]] = set()
+        out: list[dict] = []
+        with self._lock:
+            for table in ("relationships", "interaction_stats"):
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT persona_id, user_id FROM {table}"
+                ).fetchall()
+                for row in rows:
+                    persona = str(row["persona_id"] or "")
+                    user = str(row["user_id"] or "")
+                    if not user or user.startswith("group:"):
+                        continue
+                    key = (persona, user)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append({"persona_id": persona, "user_id": user})
+        out.sort(key=lambda item: (item["persona_id"], item["user_id"]))
+        return out[: max(0, int(limit))]
+
+    def latest_migration_backup(self) -> Path | None:
+        """Return the newest person-migration backup path, or ``None``."""
+        directory = self._default_backup_dir()
+        try:
+            candidates = sorted(directory.glob("person_migrate_*.json"))
+        except OSError:
+            return None
+        return candidates[-1] if candidates else None
+
+    def _person_snapshot_locked(self, person_id: str, aliases: list[str]) -> dict:
+        keys = [person_id, *aliases]
+        snapshot: dict[str, list[dict]] = {}
+        for table in PERSON_MIGRATE_TABLES:
+            rows: list[dict] = []
+            for key in keys:
+                cursor = self._conn.execute(
+                    f"SELECT * FROM {table} WHERE user_id = ?", (key,)
+                )
+                rows.extend(dict(row) for row in cursor.fetchall())
+            snapshot[table] = rows
+        return snapshot
+
+    def _merge_relationships_locked(self, person_id: str, aliases: list[str]) -> int:
+        moved = 0
+        for alias in aliases:
+            rows = self._conn.execute(
+                "SELECT * FROM relationships WHERE user_id = ?", (alias,)
+            ).fetchall()
+            for row in rows:
+                persona = row["persona_id"]
+                target = self._conn.execute(
+                    "SELECT * FROM relationships WHERE persona_id = ? AND user_id = ?",
+                    (persona, person_id),
+                ).fetchone()
+                if target is None:
+                    self._conn.execute(
+                        "UPDATE relationships SET user_id = ? "
+                        "WHERE persona_id = ? AND user_id = ?",
+                        (person_id, persona, alias),
+                    )
+                else:
+                    affinity = clamp_affinity(
+                        max(float(row["affinity"] or 0.0), float(target["affinity"] or 0.0))
+                    )
+                    self._conn.execute(
+                        "UPDATE relationships SET affinity = ?, stage = ?, bond = ?, "
+                        "last_active_day = ?, last_decay_day = ?, updated_at = ? "
+                        "WHERE persona_id = ? AND user_id = ?",
+                        (
+                            affinity,
+                            stage_for(affinity, str(target["stage"] or row["stage"] or "")),
+                            1 if (bool(row["bond"]) or bool(target["bond"])) else 0,
+                            max(
+                                [
+                                    day
+                                    for day in (row["last_active_day"], target["last_active_day"])
+                                    if day
+                                ],
+                                default="",
+                            ),
+                            max(
+                                [
+                                    day
+                                    for day in (row["last_decay_day"], target["last_decay_day"])
+                                    if day
+                                ],
+                                default="",
+                            ),
+                            _utcnow_iso(),
+                            persona,
+                            person_id,
+                        ),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM relationships WHERE persona_id = ? AND user_id = ?",
+                        (persona, alias),
+                    )
+                moved += 1
+        return moved
+
+    def _merge_stats_locked(self, person_id: str, aliases: list[str]) -> int:
+        moved = 0
+        for alias in aliases:
+            row = self._conn.execute(
+                "SELECT * FROM interaction_stats WHERE user_id = ?", (alias,)
+            ).fetchone()
+            if row is None:
+                continue
+            persona = row["persona_id"]
+            target = self._conn.execute(
+                "SELECT * FROM interaction_stats WHERE persona_id = ? AND user_id = ?",
+                (persona, person_id),
+            ).fetchone()
+            if target is None:
+                self._conn.execute(
+                    "UPDATE interaction_stats SET user_id = ? "
+                    "WHERE persona_id = ? AND user_id = ?",
+                    (person_id, persona, alias),
+                )
+            else:
+                pending = [
+                    stamp
+                    for stamp in (row["pending_proactive_at"], target["pending_proactive_at"])
+                    if stamp
+                ]
+                last = [
+                    stamp
+                    for stamp in (row["last_interaction_at"], target["last_interaction_at"])
+                    if stamp
+                ]
+                self._conn.execute(
+                    "UPDATE interaction_stats SET message_count = ?, proactive_sent = ?, "
+                    "proactive_replied = ?, unanswered_streak = ?, reply_delay_sum = ?, "
+                    "reply_delay_count = ?, pending_proactive_at = ?, last_interaction_at = ?, "
+                    "updated_at = ? WHERE persona_id = ? AND user_id = ?",
+                    (
+                        int(row["message_count"] or 0) + int(target["message_count"] or 0),
+                        int(row["proactive_sent"] or 0) + int(target["proactive_sent"] or 0),
+                        int(row["proactive_replied"] or 0) + int(target["proactive_replied"] or 0),
+                        max(
+                            int(row["unanswered_streak"] or 0),
+                            int(target["unanswered_streak"] or 0),
+                        ),
+                        float(row["reply_delay_sum"] or 0.0)
+                        + float(target["reply_delay_sum"] or 0.0),
+                        int(row["reply_delay_count"] or 0)
+                        + int(target["reply_delay_count"] or 0),
+                        max(pending) if pending else None,
+                        max(last) if last else None,
+                        _utcnow_iso(),
+                        persona,
+                        person_id,
+                    ),
+                )
+                self._conn.execute(
+                    "DELETE FROM interaction_stats WHERE persona_id = ? AND user_id = ?",
+                    (persona, alias),
+                )
+            moved += 1
+        return moved
+
+    def _rekey_rows_locked(self, table: str, person_id: str, aliases: list[str]) -> int:
+        key_cols = PERSON_MIGRATE_ROW_KEYS[table]
+        moved = 0
+        for alias in aliases:
+            rows = self._conn.execute(
+                f"SELECT * FROM {table} WHERE user_id = ?", (alias,)
+            ).fetchall()
+            for row in rows:
+                keys = [row[column] for column in key_cols]
+                row_conds = " AND ".join(
+                    ["persona_id = ?", "user_id = ?", *[f"{c} = ?" for c in key_cols]]
+                )
+                alias_params = [row["persona_id"], alias, *keys]
+                target_params = [row["persona_id"], person_id, *keys]
+                exists = self._conn.execute(
+                    f"SELECT 1 FROM {table} WHERE {row_conds}", target_params
+                ).fetchone()
+                if exists:
+                    self._conn.execute(
+                        f"DELETE FROM {table} WHERE {row_conds}", alias_params
+                    )
+                else:
+                    self._conn.execute(
+                        f"UPDATE {table} SET user_id = ? WHERE {row_conds}",
+                        [person_id, *alias_params],
+                    )
+                moved += 1
+        return moved
+
+    def _write_migration_backup(
+        self,
+        backup: dict,
+        person_id: str,
+        moment: datetime,
+        backup_dir: str | Path | None,
+    ) -> Path:
+        directory = (
+            Path(backup_dir) if backup_dir is not None else self._default_backup_dir()
+        )
+        directory.mkdir(parents=True, exist_ok=True)
+        safe = "".join(
+            ch if (ch.isalnum() or ch in "._-") else "_" for ch in person_id
+        ) or "person"
+        path = directory / f"person_migrate_{safe}_{moment.strftime('%Y%m%dT%H%M%S')}.json"
+        path.write_text(
+            json.dumps(backup, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return path
+
+    @staticmethod
+    def _default_backup_dir() -> Path:
+        from .paths import get_plugin_data_dir
+
+        return Path(get_plugin_data_dir()) / "person_migrations"
 
     # -- helpers -----------------------------------------------------------
     def table_names(self) -> set[str]:

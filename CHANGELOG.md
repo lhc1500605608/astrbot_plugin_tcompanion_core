@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-09-23
+
+### Added
+- **Person identity bridge**: `MemoryBridge.resolve_person(umo)` consumes the
+  memory plugin's public read-only `resolve_person` (probed with `hasattr`),
+  returning the authoritative `person_id` (= `canonical_user_id`) for private
+  scopes. Results are cached per `umo` for `memory_bridge.ttl_min`, including
+  negative results. **Fail-closed**: missing/disabled/timeout/error/group/empty
+  all return `None`, and the caller falls back to `parse_umo()` — v1.4.0
+  behaviour.
+- **Person-keyed private state (v1.5)**: private relationship / affinity /
+  emotion / life-line / ledger / diary rows move from `(persona_id, user_id)` to
+  `(persona_id, person_id)`; all read and write paths resolve the identity the
+  same way. **Groups stay `group:<session_id>` and never aggregate across
+  people.** Person is decoupled from persona (same person + different bot
+  persona stays two rows).
+- **Contract increment**: `get_contract_info().capabilities` gains
+  `identity_binding: true`; `get_proactive_context` gains the optional
+  `person_id` key (private scopes only, omitted when unresolved so the output
+  stays byte-identical to v1.4.0). `api_version` stays `1`; no schema change
+  (still `v6`).
+- **One-time idempotent migration**: `Store.migrate_person_keys(person_id,
+  aliases)` merges each adapter's legacy private rows into `(persona_id,
+  person_id)`, writing a JSON backup first. A repeat call is a no-op; group rows
+  are never migrated. `Store.rollback_person_migration(backup_path=None)`
+  restores the pre-migration rows. Exposed as `POST /person/migrate` and
+  `POST /person/migrate/rollback` plus Star delegates
+  `migrate_person` / `rollback_person_migration`. Never runs per message.
+- `docs/CONTRACT.md` §16.
+
+### Notes
+- With the memory plugin unavailable the private key reverts to
+  `parse_umo().user_id` and every payload matches v1.4.0 (regression-guarded).
+- Migration merges `relationships`/`interaction_stats` (affinity max, counters
+  summed, timestamps newest, streak max) and re-keys the append-only ledgers,
+  keeping the target row on conflict.
+
 ## [1.4.0] - 2026-09-23
 
 ### Added

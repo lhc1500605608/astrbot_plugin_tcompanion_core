@@ -8,7 +8,11 @@ two public read-only methods when they exist:
   already-clipped recollection snippets;
 * ``get_profile_for_prompt(umo, query, limit, session_type) -> dict`` — the user
   profile projection (``facets`` / ``summary`` / ``highlights``), probed with
-  ``hasattr`` so an older memory plugin without it simply yields no profile.
+  ``hasattr`` so an older memory plugin without it simply yields no profile;
+* ``resolve_person(umo) -> dict`` (v1.5) — the authoritative Person identity
+  (``person_id`` = the memory plugin's ``canonical_user_id``). Only the private
+  ``person_id`` is consumed here; a group scope or an older plugin without the
+  method degrades to ``None`` so callers fall back to ``parse_umo``.
 
 Invariants (see ``docs/CONTRACT.md`` §14):
 
@@ -154,8 +158,9 @@ class MemoryBridge:
         self._context = context
         self._config = config
         self._clock = clock or time.monotonic
-        # scope key -> (expires_at, payload | None)
-        self._cache: dict[str, tuple[float, dict | None]] = {}
+        # cache key -> (expires_at, payload | None); payload is a dict for
+        # ``fetch`` and a person-id str for ``resolve_person``
+        self._cache: dict[str, tuple[float, dict | str | None]] = {}
         self.hits = 0
         self.degrades = 0
         self.timeouts = 0
@@ -190,7 +195,7 @@ class MemoryBridge:
             return False, None
         return True, payload
 
-    def _cache_put(self, key: str, payload: dict | None, ttl_min: int) -> None:
+    def _cache_put(self, key: str, payload: dict | str | None, ttl_min: int) -> None:
         if ttl_min <= 0:
             self._cache.pop(key, None)
             return
@@ -253,6 +258,66 @@ class MemoryBridge:
         self.hits += 1
         self._cache_put(key, built, cfg.ttl_min)
         return built
+
+    async def resolve_person(self, umo: str) -> str | None:
+        """Return the authoritative ``person_id`` for a private ``umo`` (v1.5).
+
+        Consumes the memory plugin's public read-only ``resolve_person(umo)``
+        (probed with ``hasattr`` so an older plugin simply degrades). Private
+        scopes yield the canonical Person id, which the caller uses as the
+        relationship/emotion/life-line key so switching adapters keeps the same
+        person. **Fail-closed**: a disabled bridge, missing/older plugin,
+        group scope, timeout, error or empty result all return ``None`` — the
+        caller then falls back to ``parse_umo()`` and behaves exactly as v1.4.0.
+
+        The result is cached under the ``umo`` for ``ttl_min`` (a negative
+        ``None`` is cached too), so a burst of messages never queries per-message.
+        """
+        cfg = self.config()
+        umo = str(umo or "").strip()
+        if not cfg.enabled or not umo:
+            return None
+
+        key = f"person|{umo}"
+        cached, payload = self._cache_get(key)
+        if cached:
+            if isinstance(payload, str) and payload:
+                self.hits += 1
+                return payload
+            return None
+
+        star = self._resolve_star(cfg.plugin_name)
+        if star is None:
+            self.degrades += 1
+            self._cache_put(key, None, cfg.ttl_min)
+            return None
+        resolver = getattr(star, "resolve_person", None)
+        if not callable(resolver):
+            self.degrades += 1
+            self._cache_put(key, None, cfg.ttl_min)
+            return None
+        try:
+            raw = await asyncio.wait_for(resolver(umo), timeout=cfg.timeout_sec)
+        except asyncio.TimeoutError:
+            self.timeouts += 1
+            self.degrades += 1
+            self._cache_put(key, None, cfg.ttl_min)
+            return None
+        except Exception:
+            self.degrades += 1
+            self._cache_put(key, None, cfg.ttl_min)
+            return None
+
+        person_id = ""
+        if isinstance(raw, dict) and not raw.get("is_group"):
+            person_id = str(raw.get("person_id") or "").strip()
+        if not person_id:
+            self.degrades += 1
+            self._cache_put(key, None, cfg.ttl_min)
+            return None
+        self.hits += 1
+        self._cache_put(key, person_id, cfg.ttl_min)
+        return person_id
 
     async def _read_snippets(
         self, star, umo: str, query: str, session_type: str, cfg: MemoryBridgeConfig

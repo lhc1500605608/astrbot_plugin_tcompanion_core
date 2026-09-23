@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.4 修订）
+# TCompanion Core — 冻结契约 v1（v1.5 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.4 为纯向后兼容增量**，见 §11/§12/§13/§14/§15）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.4.0`）
+- 契约版本：`api_version = 1`（**v1.5 为纯向后兼容增量**，见 §11/§12/§13/§14/§15/§16）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.5.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -44,6 +44,17 @@
 >    `motivation.blocked_reason="quiet_hours"`）；
 > 5. `LifeState` 追加**可选**字段 `weather`/`meal`/`sleep`/`quiet`（缺省时结构与 v1.3.0
 >    逐字段一致）；schema 升级到 `6`（三张纯增量新表）。
+>
+> v1.5 变更摘要（不破坏任何 v1.x 客户端）：
+> 1. `capabilities` **保持 `dict[str, bool]`**，仅追加 `identity_binding`；
+> 2. 私聊关系/好感/情绪/生活线/账本键由 `(persona_id, user_id)` 改为
+>    `(persona_id, person_id)`（`person_id` 来自记忆桥 `resolve_person(umo)`；
+>    **不可用时 fail-closed 退回 `parse_umo().user_id`，行为同 v1.4.0**）；
+>    **群聊仍 `group:<session_id>`，不跨人**；
+> 3. `get_proactive_context` 追加**可选**键 `person_id`（**仅私聊**且解析成功；
+>    否则整键缺省，输出与 v1.4.0 逐字节一致）；
+> 4. 新增一次性、幂等、可回滚的 `Store.migrate_person_keys`（`POST /person/migrate`
+>    + `/person/migrate/rollback`）；无 schema 变更（仍 `6`）。
 
 ## 1. 通用约定
 
@@ -72,7 +83,7 @@
 | `plugin` | `str` | 否 | 固定 `astrbot_plugin_tcompanion_core` |
 | `plugin_version` | `str` | 否 | 插件版本 |
 | `schema_version` | `int` | 否 | SQLite schema 版本；存储异常时为 `0` |
-| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` / `memory_bridge` |
+| `capabilities` | `dict[str, bool]` | 否 | `life_state` / `schedule` / `relationship` / `motivation` / `open_threads` / `quota` / `proactive` / `emotion` / `expression` / `open_threads_followup` / `memory_bridge` / `life_line` / `identity_binding` |
 | `open_thread` | `dict` | 否（v1.2 新增） | 生效后的未完话题配置（默认值已补齐）：`{enabled, max_open, ttl_days, expire_days, followup_max}` |
 
 `capabilities` 恒为 **`dict[str, bool]`**（v1.0.0 起即是 map，从未是数组；改成
@@ -142,6 +153,7 @@ open_threads/quota=true`，`proactive=false`（companion-core 从不自己发送
 | `expression` | `dict \| None` | 否（v1.1 新增） | `{mode, style_hints, reason}`（§12）；群聊为抑制后的安全档 |
 | `memory` | `dict` | 否（v1.3 新增） | 记忆桥只读载荷（§14.2）；桥不可用/无数据时**整键缺省**；群聊只含 `snippets` |
 | `life_detail` | `dict` | 否（v1.4 新增） | `{weather, meal, sleep, quiet, diary}`（§15.2）；**仅启用且私聊**，群聊/关闭时**整键缺省** |
+| `person_id` | `str` | 否（v1.5 新增） | 私聊回显的权威 Person（= 记忆插件 `canonical_user_id`）；解析成功才出现，群聊或桥不可用时**整键缺省**（§16） |
 | `degraded` | `bool` | 是 | 存储异常 / `life_state` 缺失或降级时为 `true` |
 
 > `emotion_state` / `expression` 是 v1.1 的**可选追加键**：老客户端（kanjyou
@@ -715,3 +727,55 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 - **群聊剥离**全部 `life_detail`/私聊生活线；只存结构化字段（码/时段/计数/合成摘要），
   **不存用户原文**；天气仅内存缓存、可清。
 - 位置/周期/梦境**不在本阶段**（不加开关、不落配置）。本阶段不引入新的 LLM 调用。
+
+## 16. 人物身份绑定与 person 键（v1.5）
+
+> 目标：让**同一个人**在多个适配器（aiocqhttp / astrbook / …）下被视为同一个「人物」，
+> 换渠道不再等于换人。**身份权威在记忆插件（tmemory）**，companion-core 只**只读消费**；
+> 契约 `api_version` 仍为 `1`，本节均为加法。
+
+### 16.1 身份桥（`MemoryBridge.resolve_person(umo)`）
+
+- 通过 `hasattr` 探测并调用记忆插件公开的只读 `resolve_person(umo)`：
+  私聊返回 `{person_id, adapter, adapter_user_id, is_group}`，其中
+  `person_id = canonical_user_id`；群聊返回 `is_group=true` 且 `person_id=""`。
+- 结果按 **umo** 做 TTL 缓存（默认与 `memory_bridge.ttl_min` 同源，`0` 表示不缓存），
+  避免逐消息查询；连**负结果**（解析不到）也会缓存，防止击穿。
+- **Fail-closed**：桥未装配 / 记忆插件未安装或未启用 / 缺少该方法 / 超时（默认 ≤2s）/
+  任何异常 / 空结果 → 一律返回 `None`，由调用方退回 `parse_umo()`，行为同 v1.4.0。
+  只读：不写库、不隐式建绑定、不传递任何消息原文。
+
+### 16.2 person 键（私聊）/ 群聊隔离
+
+- **私聊**：关系/好感/情绪/生活线/账本/日记的存储键由 `(persona_id, user_id)` 改为
+  `(persona_id, person_id)`。`get_relationship` / `get_proactive_context` /
+  `get_emotion_context` / `expression_decision` / `get_life_line` / `get_diary` /
+  `get_open_threads` 等读路径与 `record_emotion_event` / `on_proactive_outcome` 等写
+  路径统一走身份解析，保证同一 Person 读写同一份。
+- **Person 与 persona 解耦**：绑定只作用于「人」，不同 bot persona 仍是各自独立的一份。
+- **群聊**：键保持 `group:<session_id>`，且**永不跨人聚合**；绑定不影响群聊隔离。
+
+### 16.3 一次性幂等迁移（`POST /person/migrate`）
+
+- 入参：`{person_id, aliases[]}`，`aliases` 为该 Person 名下各适配器的旧键（如
+  `adapter:user`）。迁移把旧键行并入 `(persona_id, person_id)`。
+- **先备份**：改动前把受影响行（旧键 + 目标键）写成 JSON 备份
+  （`data/plugin_data/<plugin>/person_migrations/person_migrate_<person>_<ts>.json`）。
+- **幂等**：第二次调用时旧键已无行 → `noop=true`，不重复写备份。
+- **回滚**：`POST /person/migrate/rollback`（`{backup_path?}`，缺省取最新备份）删除本次
+  目标/旧键行并回填备份行。
+- **群聊行不迁移**：`group:*` 键被显式跳过。
+- 合并语义：`relationships`/`interaction_stats` 聚合（好感取较大值、计数求和、
+  时间取较新、streak 取较大）；追加型账本（`emotion_events`/`affinity_ledger`/
+  `motivation_log`/`sleep_windows`/`life_events`/`life_diary`）按行唯一键改键，
+  冲突时保留目标键行。**不在每条消息上运行**，仅由 `POST /person/migrate` 或
+  Star 的 `migrate_person(...)` 手动/配置触发。
+
+### 16.4 契约增量
+
+- `get_contract_info().capabilities["identity_binding"] = true`（该位表示**能力存在**，
+  实际可用性由运行时桥的降级决定）。
+- `get_proactive_context` 追加可选 `person_id`（仅私聊解析成功时）。
+- `Store.migrate_person_keys(...)` / `Store.rollback_person_migration(...)`；Star 面
+  `migrate_person(...)` / `rollback_person_migration(...)` 与两条 Web API 路由。
+- **无 schema 变更**（`schema_version` 仍为 `6`）。

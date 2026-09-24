@@ -263,14 +263,14 @@ streak/账本。`dynamics` 为 `interaction_stats` 投影（§9.3）。
 fail-closed 处理。回归由 `tests/test_star_surface.py` 钉住：断言 Star 的公开
 async 面与 `ContractV1` 完全一致。
 
-## 7. SQLite schema（`schema_version = 7`）
+## 7. SQLite schema（`schema_version = 8`）
 
 库文件：`get_astrbot_plugin_data_path()/astrbot_plugin_tcompanion_core/tcompanion_core.sqlite3`。
 
 表：`personas` / `life_state_daily` / `life_schedule` / `relationships` /
 `affinity_ledger` / `interaction_stats` / `open_threads` / `motivation_log` /
 `emotion_events` / `sleep_windows` / `life_events` / `life_diary` /
-`group_activity` / `group_members` / `growth_state`
+`group_activity` / `group_members` / `growth_state` / `life_content`
 （另有迁移元表 `schema_meta`）。
 
 v2（T2）将关系三表重构为真实模型，键均为 `(persona_id, user_id)`：
@@ -320,8 +320,8 @@ v6（v1.4，Phase 2-D）为**纯增量**：新增三张表，`CREATE TABLE IF NO
   `summary` 为**确定性模板合成**（非用户原文）。
 
 > v1/v2 表仅存派生值、无消息原文，故重构/追加均安全；迁移仍幂等：
-> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v7；
-> 既有 v2–v6 库会安全原地升级到 v7。
+> 重复 `apply_migrations()` 不改写 `schema_meta`。全新库会依次执行 v1→v8；
+> 既有 v2–v7 库会安全原地升级到 v8。
 
 v7（v1.6，Phase 3-A/3-C）为**纯增量**：新增三张表，`CREATE TABLE IF NOT EXISTS`
 + 索引，**不触碰任何既有表或旧行**，重复执行不报错。旧代码（v1.5.x）不查询新表，
@@ -336,6 +336,16 @@ v7（v1.6，Phase 3-A/3-C）为**纯增量**：新增三张表，`CREATE TABLE I
   形如 `group:<session_id>#<user_id>`，**不与私聊 `person` 合并、不跨群聚合**。
 - `growth_state(persona_id, user_id, level, xp, reset_at, updated_at)` —— 成长等级
   高水位（`level`/`xp` 只升不降）与 `reset_at`（清零回退），主键 `(persona_id, user_id)`。
+
+v8（v1.7，Phase 3-B）为**纯增量**：新增一张表，`CREATE TABLE IF NOT EXISTS` +
+唯一索引/查询索引，**不触碰任何既有表或旧行**，重复执行不报错。旧代码（v1.6.x）
+不查询新表，可安全共存，无需回滚。
+
+- `life_content(persona_id, ts, kind, source_ref, summary, tags, dedupe_key,
+  expires_at)` —— persona 作用域的见闻/话题素材（**不绑用户身份**）；唯一索引
+  `(persona_id, dedupe_key)` 去重，查询索引 `(persona_id, ts)`。`source_ref` =
+  `sha256(来源 URL)` 截断（去敏不可逆）；`summary` 为**去 HTML 后截断**的短文本
+  （≤ `content_max_chars`），**不存外部原文全文**；`expires_at` 为空或到期时间。
 
 **隐私不变式**：以上任何表都不含消息原文/正文列。`group_activity.topic` 为短标签、
 `life_state_daily.summary` 为模型生成的当日生活摘要、`open_threads.title` 为话题标题，
@@ -918,3 +928,87 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 
 - 群聊无成长（`isolated` 空）；成长**不引入**新表以外的写入、不新增 LLM 调用、
   不存原文。能力缺失/异常 → 该能力缺省，行为同 v1.5.x，不抛错。
+
+## 19. 内容生活 · 见闻（v1.7 · Phase 3-B）
+
+> 实现：`core/life_content.py`（纯逻辑：配置/解析/去重/截断/护栏）+ `core/store.py`
+> （`life_content` 表，schema **v8**）+ `core/contract.py`（取源/生成/读取投影）。
+> 契约 `api_version` 仍为 `1`，全部为**加法**；`get_proactive_context` **不变**，
+> 见闻由消费方（如 kanjyou）**按需单独读取**。默认关。
+
+### 19.1 接口
+
+- `get_life_content(persona_id, window=72h, kind=None) -> dict`
+  - `{api_version, persona_id, items: [{ts, kind, source_ref, summary, tags,
+    expires_at}], degraded}`；纯读、**绝不抛错**。
+  - 关 / 空 persona / 存储异常 → 空 `items`（存储异常置 `degraded=true`）。
+  - `window` 接受 `timedelta` 或小时数（`int`/`float`），缺省近 72 小时；`kind`
+    过滤 `rss` / `topic`。读取前惰性清理已过期行。
+- `refresh_life_content(persona_id=None) -> dict`
+  - `{applied, generated, skipped_reason, degraded}`；**有界生成**、**绝不抛错**。
+  - 关 → `skipped_reason="disabled"`；无来源 → `"no_sources"`；未到最小刷新间隔
+    → `"min_interval"`；当日额度用尽 → `"daily_limit"`；生成 0 条 → `"empty"`；
+    异常 → `"error"`（`degraded=true`）。`applied = generated > 0`。
+- `capabilities["life_content"] = true`（新增键，旧 core 无该键 → 消费方
+  fail-closed）。
+
+### 19.2 生成流水线（低频、有界）
+
+1. **闸门**：`disabled` → `no_sources` → 最小刷新间隔 `MIN_REFRESH_INTERVAL_MIN`
+   （内部常量，默认 **120 分钟**，按该 persona 最新见闻 `ts` 计）→ 每日条数上限
+   `content_max_items_per_day`（1–3，默认 2）。
+2. **静态话题池**：`content_topics` 每项生成一条 `kind="topic"`（`dedupe_key` 基于
+   话题文本，重复刷新不再新增）。
+3. **RSS/Atom 源**：`content_sources` 逐条取源（stdlib `xml.etree`，无新依赖）；
+   每来源超时 + 总超时预算；`http(s)` 白名单且**拒绝** localhost/私网/回环/链路本地
+   字面量（SSRF 护栏，见 §19.4）。
+4. **落库**：`summary = truncate(strip_html(标题或摘要), content_max_chars)`，
+   `expires_at = now + content_ttl_days`；`unique(persona_id, dedupe_key)` +
+   `INSERT OR IGNORE` 去重（重复项只刷新 `expires_at`，不新增行、不改 `ts`）。
+5. **可选摘要**：`content_summarize=false`（默认）时**零 LLM**，只存去 HTML 截断
+   文本；`true` 时用**注入式 summarizer**（`ContractV1(..., content_summarizer=)`，
+   签名为 `async (text, provider_id) -> str | None`）整理成一句话，**超时/异常/无
+   provider → 回退截断文本**，失败静默。
+
+### 19.3 退化矩阵
+
+| 条件 | 读取 | 生成 |
+| --- | --- | --- |
+| `content_enabled=false`（默认） | 空 `items`，`degraded=false` | `applied=false`, `disabled` |
+| 无 `sources`/`topics` | 空 | `no_sources` |
+| 未到最小刷新间隔 | 正常返回已有条目 | `min_interval` |
+| 当日额度用尽 | 正常返回已有条目 | `daily_limit` |
+| 来源不可达/超时/解析失败 | 正常返回已有条目 | 该源跳过，`degraded=true`，其余源继续 |
+| 摘要失败/无 provider | — | 回退截断文本，静默 |
+| 存储异常 | 空 `items`，`degraded=true` | `applied=false`, `error` |
+
+### 19.4 护栏与隐私（硬性）
+
+- **默认关**；开启后才取源。**失败静默**：任何取源/解析/摘要/存储失败都不 raise、
+  不影响主动发送。
+- **成本上限**：每日条数（1–3）+ 最小刷新间隔（120min）+ 每来源/总超时 + 摘要
+  超时。
+- **SSRF 护栏**：来源仅 `http(s)`，拒绝 `localhost` / `.local` / 私网 / 回环 /
+  链路本地 / 保留 / 组播 / 未指定地址字面量。
+- **无原文、无隐私外发**：只存去 HTML 截断摘要；`source_ref` 为 URL 的
+  `sha256` 截断（不可逆去敏）；见闻**不绑用户身份**，**不采集用户聊天、不把用户
+  数据当查询**。
+- **默认关回退**：`content_enabled=false` 时无表写入、无网络、无 LLM 调用；
+  `get_proactive_context` 与契约输出与 v1.6.0 逐字节一致。
+
+### 19.5 配置（`content` 组，面向用户）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `content_enabled` | `bool` | `false` | 启用见闻 |
+| `content_sources` | `list[str]` | `[]` | RSS/Atom 地址（仅 `http(s)`） |
+| `content_topics` | `list[str]` | `[]` | 手填兴趣/话题 |
+| `content_max_items_per_day` | `int` | `2` | 每天最多条数（1–3） |
+| `content_summarize` | `bool` | `false` | 用模型整理成一句话 |
+| `content_provider_id` | `string` | `""` | 整理用模型（留空用当前会话模型） |
+| `content_max_chars` | `int` | `80` | 每条摘要最大字数 |
+| `content_ttl_days` | `int` | `14` | 见闻保留天数（过期自动清理） |
+
+内部常量（不暴露）：`MIN_REFRESH_INTERVAL_MIN`（默认 120）、每来源超时
+`CONTENT_SOURCE_TIMEOUT_SEC`、总超时 `CONTENT_TOTAL_TIMEOUT_SEC`、摘要超时
+`CONTENT_SUMMARIZE_TIMEOUT_SEC`。

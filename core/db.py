@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Callable
 
 #: Current target schema version.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: A migration step is either a SQL script or a callable taking the connection
 #: (needed when the DDL must be guarded by a runtime check, e.g. column
@@ -192,6 +192,35 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """v8: life-content table (additive).
+
+    Pure increment: one new table created with ``CREATE TABLE IF NOT EXISTS``
+    (plus a unique index for ``dedupe_key`` and a query index), so re-running is
+    a no-op and **no existing table or row is touched**. Old code (v1.6.x) never
+    queries this table and keeps working unchanged. Only a de-HTML'd, truncated
+    summary is stored — never an external article body and never a message body.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS life_content (
+            persona_id TEXT NOT NULL,
+            ts         TEXT NOT NULL,
+            kind       TEXT NOT NULL DEFAULT 'rss',
+            source_ref TEXT NOT NULL DEFAULT '',
+            summary    TEXT NOT NULL DEFAULT '',
+            tags       TEXT NOT NULL DEFAULT '',
+            dedupe_key TEXT NOT NULL,
+            expires_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_life_content_dedupe
+            ON life_content (persona_id, dedupe_key);
+        CREATE INDEX IF NOT EXISTS idx_life_content_scope
+            ON life_content (persona_id, ts);
+        """
+    )
+
+
 #: Ordered (version, step) pairs. Steps run at most once per database.
 MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (
@@ -359,6 +388,7 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (5, _migrate_v5),
     (6, _migrate_v6),
     (7, _migrate_v7),
+    (8, _migrate_v8),
 )
 
 #: All tables that must exist after migration, used by tests/health checks.
@@ -379,6 +409,7 @@ EXPECTED_TABLES: tuple[str, ...] = (
     "group_activity",
     "group_members",
     "growth_state",
+    "life_content",
 )
 
 

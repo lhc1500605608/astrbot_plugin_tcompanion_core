@@ -1832,6 +1832,109 @@ class Store:
 
         return Path(get_plugin_data_dir()) / "person_migrations"
 
+    # -- life content (v1.7, schema v8) -----------------------------------
+    def upsert_life_content(
+        self,
+        persona_id: str,
+        *,
+        kind: str,
+        source_ref: str,
+        summary: str,
+        dedupe_key: str,
+        tags: str = "",
+        expires_at: str = "",
+        ts: datetime | None = None,
+    ) -> bool:
+        """Insert one content item, deduped by ``(persona_id, dedupe_key)``.
+
+        ``INSERT OR IGNORE`` on the unique ``(persona_id, dedupe_key)`` index so
+        a repeated source item never duplicates. On a duplicate only
+        ``expires_at`` is refreshed (the original ``ts`` is kept so the daily
+        counter stays honest). Returns ``True`` only when a new row was written.
+        """
+        moment = ts or _utcnow()
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO life_content
+                    (persona_id, ts, kind, source_ref, summary, tags, dedupe_key, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persona_id,
+                    moment.isoformat(),
+                    kind,
+                    source_ref,
+                    summary,
+                    tags,
+                    dedupe_key,
+                    expires_at,
+                ),
+            )
+            inserted = cursor.rowcount > 0
+            if not inserted:
+                self._conn.execute(
+                    "UPDATE life_content SET expires_at = ? "
+                    "WHERE persona_id = ? AND dedupe_key = ?",
+                    (expires_at, persona_id, dedupe_key),
+                )
+            self._conn.commit()
+        return inserted
+
+    def query_life_content(
+        self,
+        persona_id: str,
+        *,
+        since_iso: str | None = None,
+        kind: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return non-expired content rows for a persona, newest first."""
+        sql = "SELECT * FROM life_content WHERE persona_id = ?"
+        params: list = [persona_id]
+        if since_iso:
+            sql += " AND ts >= ?"
+            params.append(since_iso)
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY ts DESC, dedupe_key LIMIT ?"
+        params.append(max(0, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def purge_expired_life_content(self, now: datetime | None = None) -> int:
+        """Delete rows whose ``expires_at`` has passed. Returns the count."""
+        moment = now or _utcnow()
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM life_content WHERE expires_at != '' AND expires_at <= ?",
+                (moment.isoformat(),),
+            )
+            self._conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def count_life_content_today(self, persona_id: str, day: str) -> int:
+        """Count content rows generated on ``day`` (``YYYY-MM-DD``)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM life_content "
+                "WHERE persona_id = ? AND ts >= ? AND ts < ?",
+                (persona_id, f"{day}T00:00:00", f"{day}T23:59:59.999999"),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def last_life_content_refresh(self, persona_id: str) -> str | None:
+        """Return the newest content timestamp for a persona, or ``None``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(ts) FROM life_content WHERE persona_id = ?",
+                (persona_id,),
+            ).fetchone()
+        value = row[0] if row else None
+        return str(value) if value else None
+
     # -- helpers -----------------------------------------------------------
     def table_names(self) -> set[str]:
         with self._lock:

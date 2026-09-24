@@ -9,6 +9,8 @@ Field types / optionality / degradation matrix: see ``docs/CONTRACT.md``.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -39,6 +41,25 @@ from .growth import (
     growth_available,
     parse_growth_config,
     with_growth_drift,
+)
+from .life_content import (
+    CONTENT_READ_LIMIT,
+    CONTENT_SOURCE_TIMEOUT_SEC,
+    CONTENT_SUMMARIZE_TIMEOUT_SEC,
+    CONTENT_TOTAL_TIMEOUT_SEC,
+    CONTENT_WINDOW_HOURS,
+    KIND_RSS,
+    KIND_TOPIC,
+    MIN_REFRESH_INTERVAL_MIN,
+    ContentConfig,
+    dedupe_key_for,
+    fetch_feed_text,
+    is_safe_source_url,
+    parse_content_config,
+    parse_feed,
+    source_ref_for,
+    strip_html,
+    truncate,
 )
 from .life_line import (
     QUIET_INTERACTION_GRACE_MIN,
@@ -76,7 +97,7 @@ from .weather import WeatherClient
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.6.0"
+PLUGIN_VERSION = "1.7.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -152,6 +173,8 @@ class ContractV1:
         config=None,
         memory_bridge=None,
         weather_client=None,
+        content_fetcher=None,
+        content_summarizer=None,
     ) -> None:
         self._store = store
         self._schedule = schedule
@@ -163,6 +186,10 @@ class ContractV1:
         self._injected_weather = weather_client
         self._weather_client = weather_client
         self._weather_key: tuple | None = None
+        # v1.7 life content: injected seams (tests/caller). Both default to
+        # ``None`` — no network fetch and no LLM summarization happen then.
+        self._content_fetcher = content_fetcher
+        self._content_summarizer = content_summarizer
 
     # -- info --------------------------------------------------------------
     async def get_contract_info(self) -> dict:
@@ -198,6 +225,8 @@ class ContractV1:
                 # additive v1.6 keys (Phase 3-A/3-C); the map shape stays dict[str, bool]
                 "group_aware": True,
                 "growth": True,
+                # additive v1.7 key (Phase 3-B); the map shape stays dict[str, bool]
+                "life_content": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -1250,6 +1279,81 @@ class ContractV1:
         except Exception:
             return None
 
+    # -- life content (v1.7) -----------------------------------------------
+    async def get_life_content(
+        self,
+        persona_id: str,
+        window: timedelta | int | None = None,
+        kind: str | None = None,
+    ) -> dict:
+        """Return recent 见闻/topic items for ``persona_id`` (pure read).
+
+        Fail-closed and never raises: a disabled ``content`` section and any
+        storage error both yield an empty ``items`` list (``degraded`` marks the
+        latter). Only de-HTML'd, truncated summaries are returned — never a
+        source body and never a message body.
+        """
+        base = {
+            "api_version": self.api_version,
+            "persona_id": persona_id,
+            "items": [],
+            "degraded": False,
+        }
+        if not persona_id:
+            return base
+        cfg = self._content_config()
+        if not cfg.enabled:
+            return base
+        try:
+            moment = self._clock()
+            since = self._content_since(window, moment)
+            self._store.purge_expired_life_content(moment)
+            rows = self._store.query_life_content(
+                persona_id, since_iso=since, kind=kind, limit=CONTENT_READ_LIMIT
+            )
+        except Exception:
+            return {**base, "degraded": True}
+        return {**base, "items": [self._content_item(row) for row in rows]}
+
+    async def refresh_life_content(self, persona_id: str | None = None) -> dict:
+        """Generate a bounded batch of content items (never raises).
+
+        Gated by the minimum refresh interval and the daily item cap; a disabled
+        section, an over-limit call or an upstream failure is a silent no-op
+        (``applied=false`` + ``skipped_reason``).
+        """
+        result = {"applied": False, "generated": 0, "skipped_reason": "", "degraded": False}
+        try:
+            cfg = self._content_config()
+            if not cfg.enabled:
+                return {**result, "skipped_reason": "disabled"}
+            if not cfg.sources and not cfg.topics:
+                return {**result, "skipped_reason": "no_sources"}
+            moment = self._clock()
+            persona = persona_id or DEFAULT_PERSONA_ID
+            self._store.purge_expired_life_content(moment)
+            last = self._store.last_life_content_refresh(persona)
+            last_at = _parse_iso(last) if last else None
+            if last_at is not None and (moment - last_at) < timedelta(
+                minutes=MIN_REFRESH_INTERVAL_MIN
+            ):
+                return {**result, "skipped_reason": "min_interval"}
+            used = self._store.count_life_content_today(persona, moment.date().isoformat())
+            remaining = max(0, cfg.max_items_per_day - used)
+            if remaining <= 0:
+                return {**result, "skipped_reason": "daily_limit"}
+            generated, degraded = await self._generate_life_content(
+                persona, cfg, moment, remaining
+            )
+        except Exception:
+            return {**result, "skipped_reason": "error", "degraded": True}
+        return {
+            "applied": generated > 0,
+            "generated": generated,
+            "skipped_reason": "" if generated > 0 else "empty",
+            "degraded": degraded,
+        }
+
     # -- internals ---------------------------------------------------------
     def _open_thread_config(self) -> OpenThreadConfig:
         """Parse the ``open_thread`` group; defaults on any failure.
@@ -1290,6 +1394,141 @@ class ContractV1:
             return parse_life_line_config(self._config)
         except Exception:
             return LifeLineConfig()
+
+    # -- life content internals (v1.7) -------------------------------------
+    def _content_config(self) -> ContentConfig:
+        """Parse the ``content`` group; defaults on any failure (hot-reload safe)."""
+        try:
+            return parse_content_config(self._config)
+        except Exception:
+            return ContentConfig()
+
+    @staticmethod
+    def _content_since(window: timedelta | int | None, moment: datetime) -> str:
+        if isinstance(window, timedelta):
+            delta = window if window.total_seconds() > 0 else timedelta(hours=CONTENT_WINDOW_HOURS)
+        elif isinstance(window, (int, float)) and window > 0:
+            delta = timedelta(hours=float(window))
+        else:
+            delta = timedelta(hours=CONTENT_WINDOW_HOURS)
+        return (moment - delta).isoformat()
+
+    @staticmethod
+    def _content_item(row: dict) -> dict:
+        tags = [
+            part.strip()
+            for part in str(row.get("tags") or "").split(",")
+            if part.strip()
+        ]
+        return {
+            "ts": row.get("ts") or "",
+            "kind": row.get("kind") or "",
+            "source_ref": row.get("source_ref") or "",
+            "summary": row.get("summary") or "",
+            "tags": tags,
+            "expires_at": row.get("expires_at") or "",
+        }
+
+    async def _generate_life_content(
+        self, persona_id: str, cfg: ContentConfig, moment: datetime, remaining: int
+    ) -> tuple[int, bool]:
+        """Fetch/derive up to ``remaining`` items; returns ``(generated, degraded)``."""
+        generated = 0
+        degraded = False
+
+        for topic in cfg.topics:
+            if generated >= remaining:
+                break
+            item = self._topic_item(topic, cfg)
+            if item is not None and self._store_life_content(persona_id, item, cfg, moment):
+                generated += 1
+
+        deadline = time.monotonic() + CONTENT_TOTAL_TIMEOUT_SEC
+        for url in cfg.sources:
+            if generated >= remaining or time.monotonic() >= deadline:
+                break
+            if not is_safe_source_url(url):
+                degraded = True
+                continue
+            text = await fetch_feed_text(
+                url, timeout=CONTENT_SOURCE_TIMEOUT_SEC, fetcher=self._content_fetcher
+            )
+            if text is None:
+                degraded = True
+                continue
+            source_ref = source_ref_for(url)
+            for entry in parse_feed(text):
+                if generated >= remaining:
+                    break
+                item = self._entry_item(entry, source_ref, cfg)
+                if item is None:
+                    continue
+                summary = await self._summarize_content(item["summary"], cfg)
+                if summary:
+                    item["summary"] = summary
+                if self._store_life_content(persona_id, item, cfg, moment):
+                    generated += 1
+        return generated, degraded
+
+    @staticmethod
+    def _topic_item(topic: str, cfg: ContentConfig) -> dict | None:
+        text = strip_html(topic)
+        if not text:
+            return None
+        return {
+            "kind": KIND_TOPIC,
+            "source_ref": KIND_TOPIC,
+            "summary": truncate(text, cfg.max_chars),
+            "tags": "",
+            "dedupe_key": dedupe_key_for(KIND_TOPIC, {"title": text}),
+        }
+
+    @staticmethod
+    def _entry_item(entry: dict, source_ref: str, cfg: ContentConfig) -> dict | None:
+        title = strip_html(entry.get("title"))
+        body = strip_html(entry.get("summary"))
+        text = body or title
+        if not text:
+            return None
+        return {
+            "kind": KIND_RSS,
+            "source_ref": source_ref,
+            "summary": truncate(text, cfg.max_chars),
+            "tags": "",
+            "dedupe_key": dedupe_key_for(source_ref, entry),
+        }
+
+    def _store_life_content(
+        self, persona_id: str, item: dict, cfg: ContentConfig, moment: datetime
+    ) -> bool:
+        try:
+            return self._store.upsert_life_content(
+                persona_id,
+                kind=item["kind"],
+                source_ref=item["source_ref"],
+                summary=item["summary"],
+                tags=item.get("tags") or "",
+                dedupe_key=item["dedupe_key"],
+                expires_at=(moment + timedelta(days=cfg.ttl_days)).isoformat(),
+                ts=moment,
+            )
+        except Exception:
+            return False
+
+    async def _summarize_content(self, text: str, cfg: ContentConfig) -> str:
+        """Optionally condense ``text`` via the injected summarizer (fail-silent)."""
+        if not cfg.summarize or self._content_summarizer is None:
+            return text
+        try:
+            result = await asyncio.wait_for(
+                self._content_summarizer(text, cfg.provider_id),
+                timeout=CONTENT_SUMMARIZE_TIMEOUT_SEC,
+            )
+        except Exception:
+            return text
+        if isinstance(result, str) and result.strip():
+            return truncate(strip_html(result), cfg.max_chars)
+        return text
 
     # -- group / growth internals (v1.6) -----------------------------------
     def _group_config(self) -> GroupConfig:

@@ -175,7 +175,7 @@ def test_migrate_v5_to_v6_in_place_preserves_and_adds(tmp_path):
 
 # -- schema v7 (group + growth) -------------------------------------------
 def test_schema_v7_group_and_growth_tables(store):
-    assert store.schema_version == schema.SCHEMA_VERSION == 7
+    assert schema.SCHEMA_VERSION >= 7
     assert {"group_activity", "group_members", "growth_state"} <= store.table_names()
 
 
@@ -193,7 +193,7 @@ def test_migrate_v6_to_v7_in_place_preserves_and_adds(tmp_path):
         )
         conn.commit()
 
-        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 7
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
         row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
         assert row["title"] == "旧话题"
         for table in ("group_activity", "group_members", "growth_state"):
@@ -201,7 +201,45 @@ def test_migrate_v6_to_v7_in_place_preserves_and_adds(tmp_path):
 
         for _ in range(3):
             schema._migrate_v7(conn)
-        assert schema.apply_migrations(conn) == 7
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION
+        assert conn.execute("SELECT COUNT(*) FROM open_threads").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+# -- schema v8 (life content) ---------------------------------------------
+def test_schema_v8_life_content_table(store):
+    assert store.schema_version == schema.SCHEMA_VERSION == 8
+    assert "life_content" in store.table_names()
+    cols = {row[1] for row in store.connection.execute("PRAGMA table_info(life_content)")}
+    assert {
+        "persona_id", "ts", "kind", "source_ref", "summary", "tags",
+        "dedupe_key", "expires_at",
+    } <= cols
+
+
+def test_migrate_v7_to_v8_in_place_preserves_and_adds(tmp_path):
+    """Old v7 rows survive; the new table starts empty; idempotent."""
+    db_file = tmp_path / "v7.sqlite3"
+    conn = schema.connect(str(db_file))
+    try:
+        assert schema.apply_migrations(conn, target=7) == 7
+        conn.execute(
+            "INSERT INTO open_threads "
+            "(thread_id, umo, persona_id, title, status, opened_at, updated_at) "
+            "VALUES ('legacy', 'umo://u', 'p1', '旧话题', 'open', "
+            "'2026-09-10T10:00:00+00:00', '2026-09-11T10:00:00+00:00')"
+        )
+        conn.commit()
+
+        assert schema.apply_migrations(conn) == schema.SCHEMA_VERSION == 8
+        row = conn.execute("SELECT * FROM open_threads WHERE thread_id = 'legacy'").fetchone()
+        assert row["title"] == "旧话题"
+        assert conn.execute("SELECT COUNT(*) FROM life_content").fetchone()[0] == 0
+
+        for _ in range(3):
+            schema._migrate_v8(conn)
+        assert schema.apply_migrations(conn) == 8
         assert conn.execute("SELECT COUNT(*) FROM open_threads").fetchone()[0] == 1
     finally:
         conn.close()

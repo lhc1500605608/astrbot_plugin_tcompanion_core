@@ -37,6 +37,8 @@ CONTRACT_METHODS = frozenset(
         "expression_decision",
         "get_life_line",
         "get_diary",
+        "get_life_content",
+        "refresh_life_content",
         "record_open_thread",
         "get_open_threads",
         "close_open_thread",

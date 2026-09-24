@@ -101,7 +101,10 @@ class TCompanionCore(Star):
         # Optional read-only bridge to the memory plugin (fail-closed when absent).
         self._memory_bridge = MemoryBridge(context=self.context, config=self.config)
         self.contract = ContractV1(
-            self._store, config=self.config, memory_bridge=self._memory_bridge
+            self._store,
+            config=self.config,
+            memory_bridge=self._memory_bridge,
+            content_summarizer=self._summarize_content,
         )
         logger.info(
             "[tcompanion_core] initialized: contract v%s schema v%s db=%s",
@@ -253,6 +256,36 @@ class TCompanionCore(Star):
 
     async def get_diary(self, umo: str, day: str | None = None) -> dict | None:
         return await self._contract().get_diary(umo, day=day)
+
+    async def get_life_content(
+        self, persona_id: str, window: timedelta | int | None = None, kind: str | None = None
+    ) -> dict:
+        return await self._contract().get_life_content(persona_id, window=window, kind=kind)
+
+    async def refresh_life_content(self, persona_id: str | None = None) -> dict:
+        return await self._contract().refresh_life_content(persona_id=persona_id)
+
+    async def _summarize_content(self, text: str, provider_id: str) -> str | None:
+        """Condense feed text into one line via the configured provider (v1.7).
+
+        Injected into the contract as the optional summarizer. Fail-closed: any
+        missing provider or error yields ``None`` so the caller keeps the
+        truncated text.
+        """
+        generate = getattr(self.context, "llm_generate", None)
+        if generate is None:
+            return None
+        prompt = f"请用一句话概括下面的内容，只输出这句话，不要添加解释或多余文字：\n{text}"
+        try:
+            completion = await generate(
+                chat_provider_id=provider_id or None, prompt=prompt
+            )
+        except Exception:
+            return None
+        value = getattr(completion, "completion_text", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return completion.strip() if isinstance(completion, str) else None
 
     async def migrate_person(
         self,

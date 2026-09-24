@@ -1,6 +1,6 @@
 # Hearthlight · 守灯
 
-<p><img alt="version" src="https://img.shields.io/badge/version-1.6.0-blue"></p>
+<p><img alt="version" src="https://img.shields.io/badge/version-1.7.0-blue"></p>
 
 <div align="center">
   <img src="./logo.png" alt="Hearthlight · 守灯" width="180">
@@ -26,11 +26,15 @@ Hearthlight · 守灯核心基座：为 AstrBot 提供持久化的关系好感�
   私聊关系、情绪或画像，保存的只有计数与短标签。
 - 成长：随相处与互动，人物的表达暖度会缓慢提升；有等级上限、可随时清零，关闭后
   回到未开启时的行为。
+- 见闻：可选地让角色拥有自己的生活素材——按配置的 RSS/Atom 来源或手填话题，低频
+  生成**无原文**的短见闻，供主动消息作话题候选；默认关，开启后受每日条数与刷新
+  间隔限制，取源失败自动忽略。见闻**不绑用户身份**、不外发用户数据。
 - 对外接口（契约）：`get_contract_info()` / `get_proactive_context()` /
   `get_life_state()` / `get_relationship()` / `record_emotion_event()` /
   `get_emotion_context()` / `expression_decision()` / `get_life_line()` /
   `get_diary()` / `record_group_activity()` / `get_group_context()` /
-  `get_growth_context()`，全部异步、缺失数据时自动降级。
+  `get_growth_context()` / `get_life_content()` / `refresh_life_content()`，
+  全部异步、缺失数据时自动降级。
 - 本插件**不主动发消息、不自起调度器**，仅提供数据与决策。
 
 ## 界面

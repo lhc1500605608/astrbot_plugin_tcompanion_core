@@ -95,6 +95,12 @@ class TCompanionCore(Star):
             ["POST"],
             "Roll back the latest Person-key migration from its JSON backup",
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/person/rekey",
+            self.api_person_rekey,
+            ["POST"],
+            "Mapping-driven rekey of orphan private keys onto their canonical Person",
+        )
 
     async def initialize(self):
         db_path = get_db_path()
@@ -317,26 +323,26 @@ class TCompanionCore(Star):
         return json_response({"day": day, "items": rows})
 
     async def api_relationships(self):
-        """All relationships plus the v1.8 ``person_key`` / ``is_group`` hints.
+        """All relationships plus the ``person_key`` / ``is_group`` hints (v1.10).
 
-        ``person_key`` groups a legacy key with its suspected canonical (the key
-        itself when unique); ``is_group`` marks group rows. The frozen
-        ``get_relationship`` shape is unchanged — this is a panel-only addition.
+        ``person_key`` is the canonical Person from the shared identity map (an
+        already-persisted canonical, else the file index / local mirror); with
+        no mapping it is the row's own key. ``is_group`` marks group rows. The
+        frozen ``get_relationship`` shape is unchanged — panel-only addition.
         """
         if self._store is None:
             return json_response({"error": "store not ready"}, status_code=503)
+        contract = self._contract()
         rows = self._store.list_relationships()
-        hints = self._store.person_key_hints(limit=max(1000, len(rows) + 1))
         items = []
         for row in rows:
-            persona_id = str(row.get("persona_id") or "")
             user_id = str(row.get("user_id") or "")
             is_group = is_group_key(user_id)
             items.append(
                 {
                     **row,
                     "is_group": is_group,
-                    "person_key": "" if is_group else hints.get((persona_id, user_id), user_id),
+                    "person_key": "" if is_group else contract.resolve_person_key(user_id),
                 }
             )
         return json_response({"items": items})
@@ -406,10 +412,30 @@ class TCompanionCore(Star):
         return body if isinstance(body, dict) else {}
 
     async def api_person_keys(self):
-        """Read-only key view: legacy keys, row counts and suspected-person hints."""
+        """Read-only key view: legacy keys, row counts and mapped person_key (v1.10)."""
         if self._store is None:
             return json_response({"error": "store not ready"}, status_code=503)
-        return json_response({"items": self._store.judge_person_keys()})
+        contract = self._contract()
+        items = self._store.person_key_views()
+        for item in items:
+            item["person_key"] = contract.resolve_person_key(item.get("user_id"))
+        return json_response({"items": items})
+
+    async def api_person_rekey(self):
+        """POST body ``{dry_run?}`` → mapping-driven rekey of orphan keys (v1.10).
+
+        ``dry_run`` defaults to true (returns the plan, touches nothing); pass
+        ``false`` to perform the merge (per-canonical backup, rollback via
+        ``/person/migrate/rollback``).
+        """
+        if self._store is None:
+            return json_response({"error": "store not ready"}, status_code=503)
+        body = await self._json_body()
+        dry_run = body.get("dry_run", True)
+        if isinstance(dry_run, str):
+            dry_run = dry_run.strip().lower() not in ("0", "false", "no", "off")
+        result = self._contract().rekey_person_keys(dry_run=bool(dry_run))
+        return json_response(result, status_code=200 if result.get("ok") else 400)
 
     async def api_person_migrate(self):
         """POST body ``{person_id, aliases[]}`` → idempotent merge (+ backup)."""

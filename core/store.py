@@ -16,13 +16,6 @@ from pathlib import Path
 from . import db as schema
 from .emotion import apply_emotion_affinity_delta, cap_emotion_delta
 from .group import GROUP_MEMBER_FAMILIARITY_MAX
-from .identity import (
-    SUSPECT_REASON_CANONICAL,
-    SUSPECT_REASON_SAME_TAIL,
-    digit_tail,
-    is_canonical_of,
-    is_group_key,
-)
 from .life_state import WeeklySchedule
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
@@ -79,65 +72,6 @@ PERSON_MIGRATE_TIME_COLUMNS: dict[str, str] = {
     "life_events": "ts",
     "life_diary": "day",
 }
-
-
-def _suspected_rank(entry: dict) -> tuple:
-    """Rank a key as the likely canonical (prefer prefixed, active, keyed)."""
-    user_id = str(entry.get("user_id") or "")
-    prefixed = 1 if (":" in user_id and digit_tail(user_id)) else 0
-    return (
-        prefixed,
-        int(entry.get("rows") or 0),
-        str(entry.get("last_active_at") or ""),
-        user_id,
-    )
-
-
-def _cluster_private_entries(
-    items: list[dict],
-) -> tuple[list[list[int]], dict[int, str]]:
-    """Union private keys into suspect groups (pure, v1.8).
-
-    Returns groups of two or more indices plus the reason recorded for each
-    member (``canonical_suffix`` wins over ``same_tail``). Group keys must have
-    been filtered out by the caller.
-    """
-    count = len(items)
-    if count < 2:
-        return [], {}
-    parent = list(range(count))
-
-    def find(index: int, roots: list[int]) -> int:
-        while roots[index] != index:
-            roots[index] = roots[roots[index]]
-            index = roots[index]
-        return index
-
-    def union(left: int, right: int, roots: list[int]) -> None:
-        root_left, root_right = find(left, roots), find(right, roots)
-        if root_left != root_right:
-            roots[root_right] = root_left
-
-    reasons: dict[int, str] = {}
-    for left in range(count):
-        for right in range(left + 1, count):
-            uid_left = str(items[left].get("user_id") or "")
-            uid_right = str(items[right].get("user_id") or "")
-            if is_canonical_of(uid_left, uid_right) or is_canonical_of(uid_right, uid_left):
-                union(left, right, parent)
-                reasons[left] = SUSPECT_REASON_CANONICAL
-                reasons[right] = SUSPECT_REASON_CANONICAL
-                continue
-            tail = digit_tail(uid_left)
-            if tail and tail == digit_tail(uid_right):
-                union(left, right, parent)
-                reasons.setdefault(left, SUSPECT_REASON_SAME_TAIL)
-                reasons.setdefault(right, SUSPECT_REASON_SAME_TAIL)
-
-    grouped: dict[int, list[int]] = {}
-    for index in range(count):
-        grouped.setdefault(find(index, parent), []).append(index)
-    return [members for members in grouped.values() if len(members) >= 2], reasons
 
 
 def _utcnow() -> datetime:
@@ -1715,20 +1649,20 @@ class Store:
         out.sort(key=lambda item: (item["persona_id"], item["user_id"]))
         return out[: max(0, int(limit))]
 
-    def judge_person_keys(self, limit: int = 100) -> list[dict]:
-        """Enriched read-only person-key view for the panel (v1.8).
+    def person_key_views(self, limit: int = 100) -> list[dict]:
+        """Read-only person-key view for the panel (v1.10).
 
-        Every :meth:`list_person_key_candidates` key gains ``rows``,
-        ``last_active_at`` and, when the heuristic clustering suspects another
-        key is the same person, ``suspected_person`` / ``suspected_reason``.
-        Nothing is written and group keys never take part.
+        Every :meth:`list_person_key_candidates` key gains ``rows`` and
+        ``last_active_at``. The ``person_key`` (canonical Person) is **not**
+        resolved here — the caller maps it from the shared identity map so this
+        stays a pure store read. Nothing is written; group keys never take part.
         """
-        entries: list[dict] = []
+        out: list[dict] = []
         for candidate in self.list_person_key_candidates(limit):
             persona_id = str(candidate.get("persona_id") or "")
             user_id = str(candidate.get("user_id") or "")
             rows, last_active_at = self._person_key_stats_locked(persona_id, user_id)
-            entries.append(
+            out.append(
                 {
                     "persona_id": persona_id,
                     "user_id": user_id,
@@ -1736,33 +1670,7 @@ class Store:
                     "last_active_at": last_active_at,
                 }
             )
-        judgments = self._cluster_person_entries(entries)
-        out: list[dict] = []
-        for entry in entries:
-            hint = judgments.get((entry["persona_id"], entry["user_id"]), {})
-            out.append(
-                {
-                    "persona_id": entry["persona_id"],
-                    "user_id": entry["user_id"],
-                    "rows": entry["rows"],
-                    "last_active_at": entry["last_active_at"],
-                    "suspected_person": hint.get("suspected_person", ""),
-                    "suspected_reason": hint.get("suspected_reason", ""),
-                }
-            )
         return out
-
-    def person_key_hints(self, limit: int = 1000) -> dict[tuple[str, str], str]:
-        """Map ``(persona_id, user_id)`` to its suspected canonical key (v1.8).
-
-        Keys with no suspected sibling are omitted. Powers the panel's
-        ``person_key`` grouping without changing any stored key.
-        """
-        return {
-            (item["persona_id"], item["user_id"]): item["suspected_person"]
-            for item in self.judge_person_keys(limit)
-            if item["suspected_person"]
-        }
 
     def _person_key_stats_locked(self, persona_id: str, user_id: str) -> tuple[int, str]:
         """Return ``(row_count, last_active_at)`` across the migrated tables."""
@@ -1781,33 +1689,6 @@ class Store:
                 if row["last"]:
                     stamps.append(str(row["last"]))
         return total, (max(stamps) if stamps else "")
-
-    def _cluster_person_entries(self, entries: list[dict]) -> dict[tuple[str, str], dict]:
-        """Heuristically cluster private keys per persona (v1.8, read-only).
-
-        Rule A (canonical tail): ``X:tail`` where ``tail`` equals another key's
-        ``user_id``. Rule B (same tail): two ``:<digits>`` keys share the same
-        digit run. Group keys never participate. Multiple candidates in a group
-        get ``suspected_person`` = the most canonical/active key in that group.
-        """
-        by_persona: dict[str, list[dict]] = {}
-        for entry in entries:
-            if is_group_key(entry.get("user_id")):
-                continue
-            by_persona.setdefault(str(entry.get("persona_id") or ""), []).append(entry)
-
-        judgments: dict[tuple[str, str], dict] = {}
-        for persona_id, items in by_persona.items():
-            groups, reasons = _cluster_private_entries(items)
-            for members in groups:
-                anchor = max(members, key=lambda index: _suspected_rank(items[index]))
-                anchor_uid = str(items[anchor].get("user_id") or "")
-                for index in members:
-                    judgments[(persona_id, str(items[index].get("user_id") or ""))] = {
-                        "suspected_person": anchor_uid,
-                        "suspected_reason": reasons.get(index, SUSPECT_REASON_SAME_TAIL),
-                    }
-        return judgments
 
     def latest_migration_backup(self) -> Path | None:
         """Return the newest person-migration backup path, or ``None``."""

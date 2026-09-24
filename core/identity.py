@@ -1,11 +1,12 @@
-"""Identity-merge helpers (v1.8).
+"""Identity helpers (v1.10).
 
-Pure, side-effect-free helpers plus the ``identity`` config parser. Two things
-live here:
+Pure, side-effect-free helpers plus the ``identity`` config parser. Identity is
+**map-driven**: the canonical Person for a private key comes from the shared
+``identity_map.json`` (see :mod:`core.identity_map`), never from string
+heuristics. What lives here is therefore only:
 
-* :func:`is_group_key` / the tail helpers that decide which private keys could
-  belong to the same person (read-only panel hints);
-* :class:`IdentityConfig`, which gates the opt-in automatic merge performed in
+* :func:`is_group_key`, the group-scope guard used by the panel/store; and
+* :class:`IdentityConfig`, which gates the opt-in automatic rekey performed in
   ``ContractV1._private_scope``.
 
 No network, no database access and nothing here ever writes.
@@ -16,11 +17,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .relationship import parse_umo
-
-#: Reason labels surfaced by the panel. Kept as plain strings so they can travel
-#: through JSON without an enum dependency.
-SUSPECT_REASON_CANONICAL = "canonical_suffix"
-SUSPECT_REASON_SAME_TAIL = "same_tail"
 
 DEFAULT_IDENTITY_AUTO_MIGRATE = False
 
@@ -73,31 +69,3 @@ def is_group_key(user_id: str) -> bool:
     if uid.startswith("group:"):
         return True
     return parse_umo(uid).is_group
-
-
-def digit_tail(user_id: str) -> str:
-    """Return the trailing digit run of a ``prefix:digits`` / bare-digit key.
-
-    Only the canonical (``prefix:tail``) and bare (``tail``) shapes qualify; a
-    full UMO such as ``aiocqhttp:FriendMessage:42`` is deliberately excluded so
-    session ids never masquerade as person keys. Returns ``""`` otherwise.
-    """
-    parts = str(user_id or "").split(":")
-    if len(parts) == 1:
-        tail = parts[0]
-    elif len(parts) == 2:
-        tail = parts[1]
-    else:
-        return ""
-    tail = tail.strip()
-    if tail and tail.isascii() and tail.isdigit():
-        return tail
-    return ""
-
-
-def is_canonical_of(candidate: str, other: str) -> bool:
-    """True when ``candidate`` looks like ``prefix:other`` (canonical tail)."""
-    parts = str(candidate or "").split(":")
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        return False
-    return parts[1] == str(other or "")

@@ -43,7 +43,7 @@ from .growth import (
     parse_growth_config,
     with_growth_drift,
 )
-from .identity import IdentityConfig, parse_identity_config
+from .identity import IdentityConfig, is_group_key, parse_identity_config
 from .life_content import (
     CONTENT_READ_LIMIT,
     CONTENT_SOURCE_TIMEOUT_SEC,
@@ -105,7 +105,7 @@ logger = logging.getLogger(__name__)
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.9.0"
+PLUGIN_VERSION = "1.10.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -2100,6 +2100,90 @@ class ContractV1:
                 fallback,
                 person_id,
             )
+
+    # -- map-driven person keys (v1.10, panel) -----------------------------
+    def resolve_person_key(self, user_id: str) -> str:
+        """Return the canonical Person key for a stored private key (v1.10).
+
+        Panel projection (kept synchronous, so it is not part of the async
+        contract surface). The canonical comes from the shared identity map
+        (``MemoryBridge``: an already-persisted online canonical, else the file
+        index / local mirror); when the map has no entry the key maps to itself
+        (v1.4 behaviour, fail-closed).
+        """
+        try:
+            key = str(user_id or "").strip()
+        except Exception:
+            return ""
+        if not key:
+            return ""
+        bridge = self._memory_bridge
+        if bridge is None:
+            return key
+        try:
+            return bridge.resolve_canonical(key) or key
+        except Exception:
+            return key
+
+    def plan_person_rekey(self, limit: int = 1000) -> list[dict]:
+        """Mapping-driven rekey plan: orphan keys grouped by canonical (v1.10).
+
+        Read-only. Returns ``[{persona_id, person_id, aliases[]}]`` for private
+        keys whose map-resolved canonical differs from the key itself. Group
+        keys and unmapped keys are never included.
+        """
+        plan: dict[tuple[str, str], list[str]] = {}
+        try:
+            candidates = self._store.list_person_key_candidates(limit)
+        except Exception:
+            return []
+        for item in candidates:
+            persona_id = str(item.get("persona_id") or "")
+            user_id = str(item.get("user_id") or "")
+            if not user_id or is_group_key(user_id):
+                continue
+            person_id = self.resolve_person_key(user_id)
+            if not person_id or person_id == user_id:
+                continue
+            plan.setdefault((persona_id, person_id), []).append(user_id)
+        return [
+            {"persona_id": persona_id, "person_id": person_id, "aliases": sorted(aliases)}
+            for (persona_id, person_id), aliases in sorted(plan.items())
+        ]
+
+    def rekey_person_keys(
+        self,
+        plan: list[dict] | None = None,
+        *,
+        dry_run: bool = False,
+        backup_dir: str | None = None,
+    ) -> dict:
+        """Rekey orphan private keys onto their canonical Person (v1.10).
+
+        Reuses ``Store.migrate_person_keys`` (idempotent, backs up every touched
+        row first; undo via ``/person/migrate/rollback``). Group keys never
+        participate. ``dry_run=True`` returns the plan without touching data.
+        """
+        groups = plan if plan is not None else self.plan_person_rekey()
+        if dry_run:
+            return {"ok": True, "dry_run": True, "plan": groups, "results": []}
+        results: list[dict] = []
+        for group in groups:
+            person_id = str(group.get("person_id") or "")
+            aliases = [str(alias) for alias in (group.get("aliases") or [])]
+            try:
+                result = self._store.migrate_person_keys(
+                    person_id, aliases, backup_dir=backup_dir
+                )
+            except Exception as exc:
+                result = {"ok": False, "reason": type(exc).__name__}
+            results.append({"person_id": person_id, "aliases": aliases, "result": result})
+        return {
+            "ok": all(bool(item["result"].get("ok")) for item in results) if results else True,
+            "dry_run": False,
+            "plan": groups,
+            "results": results,
+        }
 
     def _resolve_persona(self, scope: str, legacy: str = "") -> str:
         """Resolve the persona owning ``scope`` (falls back to default).

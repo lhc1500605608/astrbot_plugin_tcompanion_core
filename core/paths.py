@@ -64,3 +64,12 @@ def get_shared_data_dir() -> Path:
 def get_db_path() -> Path:
     """Return the SQLite database path inside the plugin data directory."""
     return get_plugin_data_dir() / "tcompanion_core.sqlite3"
+
+
+def get_identity_mirror_path() -> Path:
+    """Return companion's private mirror of the shared identity map.
+
+    ``<plugin_data>/astrbot_plugin_tcompanion_core/identity_map.json`` — the
+    single writer is companion itself (v1.10, TMEAAA-574).
+    """
+    return get_plugin_data_dir() / "identity_map.json"

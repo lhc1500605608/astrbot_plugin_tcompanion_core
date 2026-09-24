@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [1.10.0] - 2026-09-24
+
+### Changed
+- **Follow the shared identity map (drop the string heuristics)**: `/person/keys`
+  and `/relationships` now derive `person_key` from the shared map (online
+  canonical / file index / local mirror); with no mapping the key maps to
+  itself. Removed the `canonical_suffix` / `same_tail` / `digit_tail` clustering
+  from `core/identity.py` and `core/store.py`; the panel no longer reports
+  "suspected same person" strings.
+- **Local mirror (standalone-capable)**: companion keeps
+  `<plugin_data>/astrbot_plugin_tcompanion_core/identity_map.json` in sync while
+  the shared file is readable, and falls back to it when the shared file is
+  missing/unreadable, so offline person resolution and rekey keep working.
+- **Map-driven rekey**: `ContractV1.plan_person_rekey` / `rekey_person_keys`
+  (idempotent, backed up, reversible; groups never participate) plus
+  `POST /person/rekey` (dry-run by default). `docs/CONTRACT.md` §21.
+
 ## [1.9.0] - 2026-09-24
 
 ### Added

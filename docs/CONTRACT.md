@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.9 修订）
+# TCompanion Core — 冻结契约 v1（v1.10 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.9 为纯向后兼容增量**，见 §11–§20）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.9.0`）
+- 契约版本：`api_version = 1`（**v1.10 为纯向后兼容增量**，见 §11–§21）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.10.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -1079,3 +1079,55 @@ companion-core 解析私聊 Person 的优先级：
   实际可用性由运行时是否读到文件决定）。
 - **无新增公开契约方法**；`resolve_person` 为内部读取路径，`person_id` 经由既有
   可选键（§16.4）输出。**无 schema 变更**。
+
+## 21. 跟随共享身份映射（面板 + 本地镜像 + rekey，v1.10）
+
+> 目标（plan TMEAAA-563 rev2）：人物聚合**只跟随共享映射**，删除 v1.8 的字符串
+> 启发式（`canonical_suffix` / `same_tail` / `digit_tail` 聚类）。映射来源为
+> **在线 canonical / 文件 index / 本地镜像**；无映射时 `person_key = 自身键`。
+> `api_version` 仍为 `1`，本章全部为加法。
+
+### 21.1 去启发式
+
+- 删除 `core/identity.py` 的尾号/规范尾匹配判定与 `core/store.py` 的
+  `_cluster_private_entries` / `judge_person_keys` / `person_key_hints`。
+- `Store.person_key_views()` 只返回 `{persona_id, user_id, rows, last_active_at}`
+  （纯读、无映射）；`person_key` 由调用方按映射解析。
+- 面板不再出现「疑似同人」字符串标记。
+
+### 21.2 映射驱动的 `person_key`（面板）
+
+- `/person/keys` → 每项新增 `person_key`；`/relationships` → `person_key` 同源。
+- 解析（读路径）：在线 canonical 已持久化时即为自身键；否则查
+  `IdentityMap.resolve_key(user_id)` —— 支持 `adapter:uid`、裸 sender id、
+  编码 session id（WebChat `webchat!<user>!<conv>`）与 canonical 自身。
+- **无映射 = 自身键**（v1.4 行为，fail-closed）；`group:*` 永不参与映射，面板返回 `""`。
+- 方法：`ContractV1.resolve_person_key(user_id) -> str`（**同步**，非 async 契约面，
+  故不影响 `test_star_surface::CONTRACT_METHODS`）。
+
+### 21.3 本地镜像（独立可运行）
+
+- 位置：`<plugin_data>/astrbot_plugin_tcompanion_core/identity_map.json`（同格式，
+  **单一写者 = companion**；`core/paths.py::get_identity_mirror_path()`）。
+- 共享文件可读且合法时**同步**镜像（原子 `os.replace`，内容相同则跳过）；
+  共享文件缺失 / 不可读 / 损坏 / 版本不符时**回退镜像**解析。
+- companion **绝不写共享文件**；镜像写入 best-effort，异常不外抛。
+- `IdentityMap(path)` 注入显式路径时不写镜像（测试零副作用）；默认构造启用镜像。
+
+### 21.4 rekey（映射驱动、幂等、可回滚）
+
+- `ContractV1.plan_person_rekey()`（**同步、只读**）：把映射解析出 canonical 的
+  孤儿私聊键按 `(persona_id, canonical)` 归组；`group:*` 与无映射键不入。
+- `ContractV1.rekey_person_keys(plan=None, *, dry_run=False)`（**同步**）：复用
+  `Store.migrate_person_keys`（8 表合并、先备份、幂等、群聊不动）；`dry_run=True`
+  只回计划。
+- 面板路由：`POST /person/rekey`（body `{dry_run?}`，默认 `true`）；回滚复用
+  `POST /person/migrate/rollback`。
+- 既有 `identity.auto_migrate` 的在线 canonical 探测（§未变）保留：命中孤儿键时
+  自动 rekey，默认仍为**只提示不合并**。
+
+### 21.5 降级（硬性）
+
+- 无映射 / 无重复键时，`get_relationship` / `get_proactive_context` 等契约输出与
+  v1.9.0 **逐字节一致**（`identity_map` 缺失即 §20.3 的空索引）。
+- 镜像读失败同样 fail-closed 到空索引；任何映射异常不得进入读路径。

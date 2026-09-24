@@ -19,6 +19,7 @@ from core.identity_map import (
     IdentityMap,
     normalize_adapter_user_id,
     resolve_identity_map_path,
+    resolve_mirror_path,
 )
 from core.memory_bridge import MemoryBridge
 from core.relationship import parse_umo
@@ -186,6 +187,71 @@ def test_resolve_identity_map_path_default(monkeypatch, tmp_path):
     assert resolve_identity_map_path(tmp_path / "x.json") == tmp_path / "x.json"
 
 
+def test_resolve_mirror_path_default(monkeypatch, tmp_path):
+    import core.identity_map as mod
+
+    monkeypatch.setattr(mod, "get_identity_mirror_path", lambda: tmp_path / "p" / "mirror.json")
+    assert resolve_mirror_path() == tmp_path / "p" / "mirror.json"
+    assert resolve_mirror_path(tmp_path / "x.json") == tmp_path / "x.json"
+
+
+# -- stored-key resolution (panel, TMEAAA-574) -----------------------------
+def test_resolve_key_maps_stored_keys(tmp_path):
+    mapper = IdentityMap(_write_map(tmp_path / "identity_map.json"))
+    assert mapper.resolve_key("aiocqhttp:67890") == PERSON
+    assert mapper.resolve_key("67890") == PERSON
+    assert mapper.resolve_key(PERSON) == PERSON
+    assert mapper.resolve_key("unknown:1") is None
+    assert mapper.resolve_key("group:1") is None
+    assert mapper.resolve_key("") is None
+
+
+def test_resolve_key_normalizes_webchat_session(tmp_path):
+    mapper = IdentityMap(_write_map(tmp_path / "identity_map.json", WEBCHAT_PAYLOAD))
+    assert mapper.resolve_key("webchat!tmemory-smoke!qa368") == PERSON
+
+
+# -- local mirror (TMEAAA-574) ---------------------------------------------
+def test_mirror_is_synced_and_used_when_shared_missing(tmp_path):
+    shared = _write_map(tmp_path / "_shared" / "identity_map.json")
+    mirror = tmp_path / "private" / "identity_map.json"
+    mapper = IdentityMap(shared, mirror)
+
+    assert mapper.lookup("aiocqhttp", "67890") == PERSON
+    assert mirror.exists()
+
+    shared.unlink()  # tmemory gone / standalone: the mirror keeps resolving
+    assert mapper.lookup("aiocqhttp", "67890") == PERSON
+
+    fresh = IdentityMap(tmp_path / "_shared" / "identity_map.json", mirror)
+    assert fresh.lookup("aiocqhttp", "67890") == PERSON
+
+
+def test_shared_wins_over_stale_mirror(tmp_path):
+    mirror = _write_map(
+        tmp_path / "m.json", {**PAYLOAD, "index": {"aiocqhttp:67890": "mirror-person"}}
+    )
+    shared = _write_map(tmp_path / "s.json")
+    mapper = IdentityMap(shared, mirror)
+    assert mapper.lookup("aiocqhttp", "67890") == PERSON
+    assert json.loads(mirror.read_text(encoding="utf-8"))["index"] == PAYLOAD["index"]
+
+
+def test_corrupt_shared_falls_back_to_mirror(tmp_path):
+    shared = tmp_path / "s.json"
+    shared.write_text("{not json", encoding="utf-8")
+    mirror = _write_map(tmp_path / "m.json")
+    mapper = IdentityMap(shared, mirror)
+    assert mapper.lookup("aiocqhttp", "67890") == PERSON
+
+
+def test_default_construction_has_mirror_injected_path_does_not(tmp_path):
+    assert IdentityMap(tmp_path / "s.json").mirror_path is None
+    assert IdentityMap(tmp_path / "s.json", tmp_path / "m.json").mirror_path == (
+        tmp_path / "m.json"
+    )
+
+
 # -- MemoryBridge offline fallback -----------------------------------------
 async def test_online_bridge_wins_over_file(tmp_path):
     mapper = IdentityMap(_write_map(tmp_path / "identity_map.json"))
@@ -287,3 +353,21 @@ async def test_capabilities_expose_identity_map(store):
     info = await ContractV1(store).get_contract_info()
     assert info["capabilities"]["identity_map"] is True
     assert all(isinstance(value, bool) for value in info["capabilities"].values())
+
+
+# -- bridge stored-key resolution (TMEAAA-574) -----------------------------
+def test_bridge_resolve_canonical_uses_map(tmp_path):
+    mapper = IdentityMap(_write_map(tmp_path / "identity_map.json"))
+    bridge = _bridge(None, identity_map=mapper)
+    assert bridge.resolve_canonical("67890") == PERSON
+    assert bridge.resolve_canonical("aiocqhttp:67890") == PERSON
+    assert bridge.resolve_canonical("group:1") == "group:1"
+    assert bridge.resolve_canonical("unmapped") == "unmapped"
+
+
+def test_bridge_resolve_canonical_disabled_bridge_is_self(tmp_path):
+    mapper = IdentityMap(_write_map(tmp_path / "identity_map.json"))
+    bridge = _bridge(
+        None, config={"memory_bridge": {"enabled": False}}, identity_map=mapper
+    )
+    assert bridge.resolve_canonical("67890") == "67890"

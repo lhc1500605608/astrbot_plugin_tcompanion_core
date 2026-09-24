@@ -19,6 +19,9 @@ two public read-only methods when they exist:
   ``parse_umo``); a hit returns the same canonical Person. A missing/corrupt
   file degrades to ``None`` exactly as before, so behaviour stays byte-identical
   when no export exists.
+* ``resolve_canonical(user_id) -> str`` (v1.10) — read-only panel helper that
+  maps a stored private key to its canonical Person via the same map (shared
+  export, then companion's private mirror); an unmatched key maps to itself.
 
 Invariants (see ``docs/CONTRACT.md`` §14):
 
@@ -322,6 +325,26 @@ class MemoryBridge:
         self.hits += 1
         self._cache_put(key, person_id, cfg.ttl_min)
         return person_id
+
+    def resolve_canonical(self, user_id: str) -> str:
+        """Map a stored private key to its canonical Person (read-only, v1.10).
+
+        Panel helper built on the same :class:`IdentityMap` used offline (shared
+        export, then the private mirror). The map is authoritative: an unmatched
+        key is returned unchanged (v1.4 behaviour). Fail-closed: a disabled
+        bridge, an unavailable map or any error returns the key itself.
+        """
+        key = str(user_id or "").strip()
+        if not key or not self.config().enabled:
+            return key
+        mapper = self._resolve_identity_map()
+        if mapper is None:
+            return key
+        try:
+            hit = mapper.resolve_key(key)
+        except Exception:
+            return key
+        return hit or key
 
     async def _resolve_person_online(self, umo: str, cfg: MemoryBridgeConfig) -> str:
         """Online ``star.resolve_person(umo)`` → person_id (``""`` on failure)."""

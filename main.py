@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
 
 from .core.contract import PLUGIN_NAME, PLUGIN_VERSION, ContractV1
 from .core.emotion import VALENCE_WINDOW_HOURS, emotion_snapshot, expression_for
+from .core.identity import is_group_key
 from .core.memory_bridge import MemoryBridge
 from .core.paths import get_db_path
 from .core.relationship import STAGE_STRANGER
@@ -316,10 +317,29 @@ class TCompanionCore(Star):
         return json_response({"day": day, "items": rows})
 
     async def api_relationships(self):
+        """All relationships plus the v1.8 ``person_key`` / ``is_group`` hints.
+
+        ``person_key`` groups a legacy key with its suspected canonical (the key
+        itself when unique); ``is_group`` marks group rows. The frozen
+        ``get_relationship`` shape is unchanged — this is a panel-only addition.
+        """
         if self._store is None:
             return json_response({"error": "store not ready"}, status_code=503)
         rows = self._store.list_relationships()
-        return json_response({"items": rows})
+        hints = self._store.person_key_hints(limit=max(1000, len(rows) + 1))
+        items = []
+        for row in rows:
+            persona_id = str(row.get("persona_id") or "")
+            user_id = str(row.get("user_id") or "")
+            is_group = is_group_key(user_id)
+            items.append(
+                {
+                    **row,
+                    "is_group": is_group,
+                    "person_key": "" if is_group else hints.get((persona_id, user_id), user_id),
+                }
+            )
+        return json_response({"items": items})
 
     async def api_motivation_log(self):
         if self._store is None:
@@ -386,10 +406,10 @@ class TCompanionCore(Star):
         return body if isinstance(body, dict) else {}
 
     async def api_person_keys(self):
-        """Read-only list of legacy private keys, to pick migration aliases."""
+        """Read-only key view: legacy keys, row counts and suspected-person hints."""
         if self._store is None:
             return json_response({"error": "store not ready"}, status_code=503)
-        return json_response({"items": self._store.list_person_key_candidates()})
+        return json_response({"items": self._store.judge_person_keys()})
 
     async def api_person_migrate(self):
         """POST body ``{person_id, aliases[]}`` → idempotent merge (+ backup)."""

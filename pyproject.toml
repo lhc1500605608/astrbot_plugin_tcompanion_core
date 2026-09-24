@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-tcompanion-core"
-version = "1.7.0"
+version = "1.8.0"
 description = "TCompanion core foundation: frozen contract v1 + SQLite + LifeState/Schedule + emotion ledger"
 requires-python = ">=3.10"
 dependencies = []

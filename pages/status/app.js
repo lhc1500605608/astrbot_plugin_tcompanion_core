@@ -114,20 +114,9 @@ function renderLifeState(data) {
   el.innerHTML = html;
 }
 
-function renderRelationships(data) {
-  const el = document.getElementById("relationships-content");
-  const items = data.items || [];
-  if (items.length === 0) {
-    el.innerHTML = `<p class="empty-msg">${esc(t("status.relationships.empty", "No relationships recorded."))}</p>`;
-    return;
-  }
-  let html = `<table class="rel-table">
-    <thead><tr>
-      <th>${esc(t("status.relationships.user", "User"))}</th><th>${esc(t("status.relationships.persona", "Persona"))}</th><th>${esc(t("status.relationships.stage", "Stage"))}</th><th>${esc(t("status.relationships.affinity", "Affinity"))}</th><th>${esc(t("status.relationships.bond", "Bond"))}</th><th>${esc(t("status.relationships.updated", "Updated"))}</th>
-    </tr></thead><tbody>`;
-  for (const r of items) {
-    const bond = r.bond ? t("status.relationships.yes", "Yes") : t("status.relationships.no", "No");
-    html += `<tr>
+function relationshipRow(r) {
+  const bond = r.bond ? t("status.relationships.yes", "Yes") : t("status.relationships.no", "No");
+  return `<tr>
       <td>${esc(r.user_id)}</td>
       <td>${esc(r.persona_id)}</td>
       <td><span class="stage-badge">${esc(r.stage)}</span></td>
@@ -135,8 +124,53 @@ function renderRelationships(data) {
       <td>${esc(bond)}</td>
       <td>${formatDateTime(r.updated_at)}</td>
     </tr>`;
+}
+
+function relationshipTableHead() {
+  return `<thead><tr>
+      <th>${esc(t("status.relationships.user", "User"))}</th><th>${esc(t("status.relationships.persona", "Persona"))}</th><th>${esc(t("status.relationships.stage", "Stage"))}</th><th>${esc(t("status.relationships.affinity", "Affinity"))}</th><th>${esc(t("status.relationships.bond", "Bond"))}</th><th>${esc(t("status.relationships.updated", "Updated"))}</th>
+    </tr></thead>`;
+}
+
+function renderRelationships(data) {
+  const el = document.getElementById("relationships-content");
+  const items = data.items || [];
+  if (items.length === 0) {
+    el.innerHTML = `<p class="empty-msg">${esc(t("status.relationships.empty", "No relationships recorded."))}</p>`;
+    return;
   }
-  html += "</tbody></table>";
+  const privateRows = [];
+  const groupRows = [];
+  for (const r of items) {
+    if (r.is_group) groupRows.push(r);
+    else privateRows.push(r);
+  }
+  const byPerson = new Map();
+  for (const r of privateRows) {
+    const key = r.person_key || r.user_id;
+    if (!byPerson.has(key)) byPerson.set(key, []);
+    byPerson.get(key).push(r);
+  }
+  let html = "";
+  if (byPerson.size > 0) {
+    html += `<p class="section-summary">${esc(t("status.relationships.private", "Private"))}</p>`;
+    for (const [personKey, rows] of byPerson) {
+      const multi = rows.length > 1;
+      html += `<div class="rel-group${multi ? " rel-group-suspected" : ""}">`;
+      if (multi) {
+        html += `<div class="rel-group-head"><span class="person-badge">${esc(personKey)}</span><span class="suspect-tag">${esc(t("status.person.suspected", "May be the same person"))}</span></div>`;
+      }
+      html += `<table class="rel-table">${relationshipTableHead()}<tbody>`;
+      for (const r of rows) html += relationshipRow(r);
+      html += `</tbody></table></div>`;
+    }
+  }
+  if (groupRows.length > 0) {
+    html += `<p class="section-summary">${esc(t("status.relationships.groups", "Groups"))}</p>`;
+    html += `<table class="rel-table">${relationshipTableHead()}<tbody>`;
+    for (const r of groupRows) html += relationshipRow(r);
+    html += `</tbody></table>`;
+  }
   el.innerHTML = html;
 }
 
@@ -292,6 +326,222 @@ function unavailableMsg() {
   return `<p class="empty-msg">${esc(t("status.unavailable", "Data is unavailable right now."))}</p>`;
 }
 
+function personReasonLabel(reason) {
+  if (reason === "canonical_suffix") return t("status.person.reason_canonical", "Same account");
+  if (reason === "same_tail") return t("status.person.reason_same_tail", "Same account number");
+  return "";
+}
+
+function setPersonFeedback(kind, message) {
+  const el = document.getElementById("person-keys-feedback");
+  if (!el) return;
+  if (!kind || !message) {
+    el.hidden = true;
+    el.textContent = "";
+    el.classList.remove("feedback-ok", "feedback-error");
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+  el.classList.toggle("feedback-ok", kind === "ok");
+  el.classList.toggle("feedback-error", kind === "error");
+}
+
+function errMessage(err, fallback) {
+  if (!err) return fallback;
+  if (typeof err === "string" && err.trim()) return err;
+  const msg = err.message || err.reason || err.error;
+  if (typeof msg === "string" && msg.trim()) return msg;
+  return fallback;
+}
+
+function groupPersonKeys(items) {
+  const clusters = new Map();
+  const lone = [];
+  for (const item of items) {
+    const suspect = String(item.suspected_person || "");
+    if (suspect) {
+      if (!clusters.has(suspect)) clusters.set(suspect, []);
+      clusters.get(suspect).push(item);
+    } else {
+      lone.push(item);
+    }
+  }
+  for (const [key, members] of clusters) {
+    if (members.length < 2) {
+      for (const m of members) lone.push(m);
+      clusters.delete(key);
+    }
+  }
+  return { clusters, lone };
+}
+
+function personMeta(item) {
+  const rows = Number(item.rows ?? 0);
+  const last = formatDateTime(item.last_active_at);
+  const reason = personReasonLabel(item.suspected_reason);
+  return `<div class="person-meta"><span>${esc(t("status.person.rows", "Records"))}: <strong>${isNaN(rows) ? 0 : rows}</strong></span><span>${esc(t("status.person.last_active", "Last active"))}: ${esc(last)}</span>${reason ? `<span class="reason-tag">${esc(reason)}</span>` : ""}</div>`;
+}
+
+function renderPersonKeys(data) {
+  const el = document.getElementById("person-keys-content");
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (items.length === 0) {
+    el.innerHTML = `<p class="empty-msg">${esc(t("status.person.empty", "No relationship keys yet."))}</p>`;
+    return;
+  }
+  const { clusters, lone } = groupPersonKeys(items);
+  let html = "";
+  let groupIdx = 0;
+  for (const [suspect, members] of clusters) {
+    const gid = `pg-${groupIdx++}`;
+    const sorted = [...members].sort((a, b) => {
+      const ar = Number(a.rows) || 0;
+      const br = Number(b.rows) || 0;
+      if (ar !== br) return br - ar;
+      return String(a.user_id).localeCompare(String(b.user_id));
+    });
+    html += `<div class="person-cluster" data-cluster="${esc(gid)}">`;
+    html += `<div class="rel-group-head"><span class="person-badge">${esc(suspect)}</span><span class="suspect-tag">${esc(t("status.person.suspected", "May be the same person"))}</span></div>`;
+    html += `<label class="field-label" for="${gid}-target">${esc(t("status.person.target", "Merge into"))}</label>`;
+    html += `<select id="${gid}-target" class="person-select">`;
+    for (const m of sorted) {
+      const selected = m.user_id === suspect ? " selected" : "";
+      html += `<option value="${esc(m.user_id)}"${selected}>${esc(m.user_id)}</option>`;
+    }
+    html += `</select>`;
+    html += `<p class="field-label">${esc(t("status.person.aliases", "Select records to merge"))}</p><ul class="person-keys-list">`;
+    for (const m of sorted) {
+      html += `<li class="person-key-row">
+        <label><input type="checkbox" class="alias-check" value="${esc(m.user_id)}" data-persona="${esc(m.persona_id)}" /> <code>${esc(m.user_id)}</code></label>
+        ${personMeta(m)}
+      </li>`;
+    }
+    html += `</ul>`;
+    html += `<button type="button" class="btn btn-merge" data-cluster="${esc(gid)}" data-suspect="${esc(suspect)}">${esc(t("status.person.merge", "Merge"))}</button>`;
+    html += `</div>`;
+  }
+  if (lone.length > 0) {
+    html += `<p class="section-summary">${esc(t("status.person.title", "People / Merge"))}</p><ul class="person-keys-list person-keys-lone">`;
+    for (const m of lone) {
+      html += `<li class="person-key-row"><code>${esc(m.user_id)}</code>${personMeta(m)}</li>`;
+    }
+    html += `</ul>`;
+  }
+  el.innerHTML = html;
+}
+
+async function personMergeHandler(btn) {
+  const cluster = btn.closest(".person-cluster");
+  if (!cluster) return;
+  const select = cluster.querySelector(".person-select");
+  const personId = String(select && select.value ? select.value : "").trim();
+  const aliases = Array.from(cluster.querySelectorAll(".alias-check:checked"))
+    .map((cb) => String(cb.value || "").trim())
+    .filter((v) => v && v !== personId);
+  const personaIds = Array.from(cluster.querySelectorAll(".alias-check:checked"))
+    .map((cb) => String(cb.getAttribute("data-persona") || ""))
+    .filter(Boolean);
+  if (!personId || aliases.length === 0) {
+    setPersonFeedback("error", t("status.person.select_one", "Select at least one record to merge."));
+    return;
+  }
+  const beforeKeys = new Set([personId, ...aliases]);
+  const beforeCount = personRowsSum(beforeKeys);
+  btn.disabled = true;
+  setPersonFeedback(null, null);
+  try {
+    const result = await bridge.apiPost("person/migrate", { person_id: personId, aliases });
+    if (!result || typeof result !== "object" || result.ok === false) {
+      throw new Error(errMessage(result, "merge rejected"));
+    }
+    const personaId = personaIds[0] || "";
+    const after = await bridge.apiGet("person/keys");
+    const afterItems = (after && after.items) || [];
+    const afterCount = afterItems
+      .filter((it) => String(it.user_id || "") === personId && (!personaId || String(it.persona_id || "") === personaId))
+      .reduce((sum, it) => sum + (Number(it.rows) || 0), 0);
+    const merged = result.merged && typeof result.merged === "object" ? result.merged : {};
+    const mergedParts = Object.entries(merged)
+      .filter(([, n]) => Number(n) > 0)
+      .map(([k, n]) => `${k}: ${Number(n)}`);
+    const bits = [
+      t("status.person.merge_ok", "Merge complete."),
+      `${t("status.person.before", "Records before")}: ${beforeCount}`,
+      `${t("status.person.after", "Records after")}: ${afterCount}`,
+    ];
+    if (mergedParts.length) {
+      bits.push(`${t("status.person.merged_tables", "Merge details")} — ${mergedParts.join(", ")}`);
+    }
+    if (result.backup_path) {
+      bits.push(`${t("status.person.backup", "Backup file")}: ${result.backup_path}`);
+    }
+    setPersonFeedback("ok", bits.join(" · "));
+    await personReload();
+    await loadSection("relationships-content", "relationships", renderRelationships);
+  } catch (err) {
+    console.error("person/migrate failed:", err);
+    setPersonFeedback(
+      "error",
+      tf("status.person.merge_fail", { message: errMessage(err, "error") }, "Merge failed: {message}")
+    );
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+let personRowsCache = new Map();
+
+function personRowsSum(keys) {
+  let total = 0;
+  for (const k of keys) total += Number(personRowsCache.get(k) || 0);
+  return total;
+}
+
+async function personReload() {
+  const el = document.getElementById("person-keys-content");
+  if (!el) return;
+  try {
+    const data = await bridge.apiGet("person/keys");
+    if (!data || typeof data !== "object") throw new Error("invalid response");
+    if (data.error) throw new Error(String(data.error));
+    personRowsCache = new Map(
+      (data.items || []).map((it) => [String(it.user_id || ""), Number(it.rows) || 0])
+    );
+    renderPersonKeys(data);
+  } catch (err) {
+    console.error("Failed to load person/keys:", err);
+    el.innerHTML = unavailableMsg();
+  }
+}
+
+async function personRollbackHandler() {
+  const btn = document.getElementById("person-rollback-btn");
+  if (btn) btn.disabled = true;
+  setPersonFeedback(null, null);
+  try {
+    const result = await bridge.apiPost("person/migrate/rollback", {});
+    if (!result || typeof result !== "object" || result.ok === false) {
+      throw new Error(errMessage(result, "rollback rejected"));
+    }
+    const bits = [t("status.person.rollback_ok", "Rolled back.")];
+    if (result.backup_path) {
+      bits.push(`${t("status.person.backup", "Backup file")}: ${result.backup_path}`);
+    }
+    setPersonFeedback("ok", bits.join(" · "));
+    await personReload();
+    await loadSection("relationships-content", "relationships", renderRelationships);
+  } catch (err) {
+    console.error("person/migrate/rollback failed:", err);
+    setPersonFeedback(
+      "error",
+      tf("status.person.rollback_fail", { message: errMessage(err, "error") }, "Rollback failed: {message}")
+    );
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function loadSection(elementId, path, render) {
   const el = document.getElementById(elementId);
   if (!el) return;
@@ -318,10 +568,16 @@ async function loadAll() {
     loadSection("emotion-content", "emotion-state", renderEmotionState),
     loadSection("group-state-content", "group-state", renderGroupState),
     loadSection("growth-state-content", "growth-state", renderGrowthState),
+    personReload(),
   ]);
 }
 
 await bridge.ready();
 document.title = t("status.title", "Hearthlight Status");
 applyI18n(document);
+document.getElementById("person-keys-content")?.addEventListener("click", (ev) => {
+  const btn = ev.target.closest(".btn-merge");
+  if (btn) personMergeHandler(btn);
+});
+document.getElementById("person-rollback-btn")?.addEventListener("click", personRollbackHandler);
 await loadAll();

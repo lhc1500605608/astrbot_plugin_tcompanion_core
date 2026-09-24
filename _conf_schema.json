@@ -179,6 +179,19 @@
       }
     }
   },
+  "identity": {
+    "type": "object",
+    "description": "身份合并",
+    "hint": "把同一联系人换过账号产生的旧记录并到一起。",
+    "items": {
+      "auto_migrate": {
+        "type": "bool",
+        "description": "自动合并旧记录",
+        "hint": "开启后，发现同一联系人的旧记录会自动合并；默认关闭，只提示不合并。",
+        "default": false
+      }
+    }
+  },
   "life_line": {
     "type": "object",
     "description": "生活线",

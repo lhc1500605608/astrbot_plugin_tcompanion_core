@@ -10,6 +10,7 @@ Field types / optionality / degradation matrix: see ``docs/CONTRACT.md``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -42,6 +43,7 @@ from .growth import (
     parse_growth_config,
     with_growth_drift,
 )
+from .identity import IdentityConfig, parse_identity_config
 from .life_content import (
     CONTENT_READ_LIMIT,
     CONTENT_SOURCE_TIMEOUT_SEC,
@@ -73,7 +75,11 @@ from .life_line import (
     synthesize_diary,
 )
 from .life_state import WeeklySchedule, generate_life_state
-from .memory_bridge import MEMORY_WARMTH_MAX_DELTA, MEMORY_WARMTH_STEP
+from .memory_bridge import (
+    MEMORY_WARMTH_MAX_DELTA,
+    MEMORY_WARMTH_STEP,
+    parse_memory_bridge_config,
+)
 from .motivation import (
     DEFAULT_OPEN_THREAD_LIMIT,
     OPEN_THREAD_KINDS,
@@ -93,14 +99,20 @@ from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
 from .store import Store
 from .weather import WeatherClient
 
+logger = logging.getLogger(__name__)
+
 #: Frozen contract version. Bump only with a new ``docs/CONTRACT.md`` revision.
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.8.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
+
+#: Fallback TTL (minutes) for the read-only unmigrated-key probe when the
+#: memory-bridge config is unavailable. Normally mirrors the resolve_person TTL.
+IDENTITY_DETECT_TTL_MIN = 5.0
 
 
 def _utcnow() -> datetime:
@@ -190,6 +202,10 @@ class ContractV1:
         # ``None`` — no network fetch and no LLM summarization happen then.
         self._content_fetcher = content_fetcher
         self._content_summarizer = content_summarizer
+        # v1.8 identity: read-only unmigrated-key probe, cached with the same TTL
+        # as ``resolve_person``; the warning set keeps the log to one line per key.
+        self._identity_cache: dict[str, tuple[datetime | None, bool]] = {}
+        self._identity_warned: set[str] = set()
 
     # -- info --------------------------------------------------------------
     async def get_contract_info(self) -> dict:
@@ -227,6 +243,8 @@ class ContractV1:
                 "growth": True,
                 # additive v1.7 key (Phase 3-B); the map shape stays dict[str, bool]
                 "life_content": True,
+                # additive v1.8 key; the map shape stays dict[str, bool]
+                "person_merge": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),
@@ -1403,6 +1421,22 @@ class ContractV1:
         except Exception:
             return ContentConfig()
 
+    # -- identity internals (v1.8) -----------------------------------------
+    def _identity_config(self) -> IdentityConfig:
+        """Parse the ``identity`` group; defaults on any failure (hot-reload safe)."""
+        try:
+            return parse_identity_config(self._config)
+        except Exception:
+            return IdentityConfig()
+
+    def _identity_ttl_min(self) -> float:
+        """Mirror the ``resolve_person`` cache TTL (memory-bridge config)."""
+        try:
+            ttl = float(parse_memory_bridge_config(self._config).ttl_min)
+            return ttl if ttl > 0 else IDENTITY_DETECT_TTL_MIN
+        except Exception:
+            return IDENTITY_DETECT_TTL_MIN
+
     @staticmethod
     def _content_since(window: timedelta | int | None, moment: datetime) -> str:
         if isinstance(window, timedelta):
@@ -1996,6 +2030,11 @@ class ContractV1:
         ``parse_umo().user_id`` fallback (v1.4.0 behaviour). Fail-closed: any
         bridge error/absence simply yields the fallback key, and ``person_id``
         is ``""``. Group scopes must not call this (they keep ``group:<session>``).
+
+        v1.8 adds a read-only guard: when the canonical ``person_id`` differs
+        from the legacy fallback and only the fallback holds data, that is a
+        suspected unmigrated key. It is merged only when ``identity.auto_migrate``
+        is on; otherwise it is logged once and left untouched.
         """
         person_id = ""
         bridge = self._memory_bridge
@@ -2004,7 +2043,61 @@ class ContractV1:
                 person_id = await bridge.resolve_person(umo) or ""
             except Exception:
                 person_id = ""
+        if person_id and person_id != key.user_id:
+            try:
+                self._handle_identity_scope(person_id, key.user_id)
+            except Exception:
+                pass
         return (person_id or key.user_id), person_id
+
+    def _detect_unmigrated(self, person_id: str, fallback: str) -> bool:
+        """True when ``fallback`` holds a relationship row but ``person_id`` does not.
+
+        Deliberately cheap (two single-key lookups) and fail-closed: any storage
+        error is treated as "nothing to do".
+        """
+        try:
+            if not person_id or not fallback or person_id == fallback:
+                return False
+            if self._store.resolve_relationship_state(person_id) is not None:
+                return False
+            return self._store.resolve_relationship_state(fallback) is not None
+        except Exception:
+            return False
+
+    def _handle_identity_scope(self, person_id: str, fallback: str) -> None:
+        """Probe for a suspected unmigrated key and merge it only if opted in.
+
+        The probe result is cached for the ``resolve_person`` TTL so repeated
+        reads do not re-query. Never merges silently: with the default
+        ``identity.auto_migrate=false`` it only logs one warning per key.
+        """
+        cache_key = f"{person_id}\x00{fallback}"
+        now = self._clock()
+        cached = self._identity_cache.get(cache_key)
+        if cached is not None and (cached[0] is None or now < cached[0]):
+            suspected = cached[1]
+        else:
+            suspected = self._detect_unmigrated(person_id, fallback)
+            self._identity_cache[cache_key] = (
+                now + timedelta(minutes=self._identity_ttl_min()),
+                suspected,
+            )
+        if not suspected:
+            return
+        if self._identity_config().auto_migrate:
+            try:
+                self._store.migrate_person_keys(person_id, [fallback])
+            except Exception:
+                return
+        elif cache_key not in self._identity_warned:
+            self._identity_warned.add(cache_key)
+            logger.warning(
+                "tcompanion_core: legacy key %r has data but %r does not; "
+                "enable identity.auto_migrate to merge",
+                fallback,
+                person_id,
+            )
 
     def _resolve_persona(self, scope: str, legacy: str = "") -> str:
         """Resolve the persona owning ``scope`` (falls back to default).

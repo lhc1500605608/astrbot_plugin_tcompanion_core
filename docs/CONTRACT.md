@@ -1,10 +1,10 @@
-# TCompanion Core — 冻结契约 v1（v1.6 修订）
+# TCompanion Core — 冻结契约 v1（v1.9 修订）
 
 本文件是 Phase 1 冻结契约的**唯一事实来源**。字段的类型、可缺省性与降级行为一旦
 发布即冻结；变更需新开 `v2` 章节并同步 `CONTRACT_API_VERSION`。
 
-- 契约版本：`api_version = 1`（**v1.6 为纯向后兼容增量**，见 §11–§18）
-- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.6.0`）
+- 契约版本：`api_version = 1`（**v1.9 为纯向后兼容增量**，见 §11–§20）
+- 插件：`astrbot_plugin_tcompanion_core`（`plugin_version = 1.9.0`）
 - 代码入口：`core/contract.py`
 
 > v1.1 变更摘要（不破坏任何 v1.0.0 客户端）：
@@ -1012,3 +1012,70 @@ followup_max}`（缺省/异常回退到上述默认值；`get_contract_info().op
 内部常量（不暴露）：`MIN_REFRESH_INTERVAL_MIN`（默认 120）、每来源超时
 `CONTENT_SOURCE_TIMEOUT_SEC`、总超时 `CONTENT_TOTAL_TIMEOUT_SEC`、摘要超时
 `CONTENT_SUMMARIZE_TIMEOUT_SEC`。
+
+## 20. 共享身份映射（只读消费，v1.9）
+
+> 目标：当**在线身份桥不可用**（记忆插件未安装/未启用/超时/离线/独立运行）时，
+> companion-core 仍能把 `(adapter, adapter_user_id)` 解析为**同一个 canonical Person**。
+> 实现：`core/identity_map.py`（只读、按 mtime 缓存）+ `MemoryBridge.resolve_person` 回退。
+> 契约 `api_version` 仍为 `1`，本节为加法。
+
+### 20.1 位置与格式（权威方 = tmemory）
+
+- 文件：`<AstrBot data>/plugin_data/_shared/identity_map.json`（两插件同机同库各自解析，
+  同一路径）。companion-core 侧解析见 `core/paths.py::get_shared_data_dir()`。
+- **单一写者 = 记忆插件（tmemory）**；companion-core **只读**，绝不写、不建目录。
+- 格式（`version = 1`）：
+
+```json
+{
+  "version": 1,
+  "authority": "tmemory",
+  "updated_at": "...",
+  "persons": {"<canonical_user_id>": {"display_name": "", "bindings": [...], "updated_at": "..."}},
+  "index": {"<adapter>:<adapter_user_id>": "<canonical_user_id>"}
+}
+```
+
+- 只消费 `index`：键 = `f"{adapter}:{adapter_user_id}"`，其中 `adapter_user_id` = 权威方
+  写入的 **sender id**（`event.get_sender_id()`），值 = canonical（= `person_id`）。
+- 群聊**不入 index**（映射仅用于私聊 person；群聊仍 `group:<session>`）；`display_name` 可选。
+
+### 20.1.1 会话键 normalize（v1.9，TMEAAA-578）
+
+消费侧从 UMO 取 `(adapter, session_id)` 后，**必须 normalize 成权威方的 `adapter_user_id`**
+再查 `index`；否则 `session_id` 与 `sender_id` 不等的平台会全部 miss：
+
+- 多数适配器 `session_id == sender_id`，normalize 为恒等。
+- **WebChat**：私聊 `session_id = f"webchat!{username}!{conversation}"`
+  （`webchat_adapter.py`）→ 解码为 `username`（`split("!", 2)` 的第 2 段）。
+- 未知形态原样返回。实现：`core/identity_map.py::normalize_adapter_user_id()`
+  （`IdentityMap.lookup` 内部调用，故直接传 `parse_umo().session_id` 也能命中）。
+- 权威方 tmemory 侧对同一规则做对称 decode（`adapters/event.py::get_adapter_user_id_from_umo`
+  用于 umo→`identity_bindings` 回退查找），两端键空间保持一致。
+
+### 20.2 解析优先级
+
+companion-core 解析私聊 Person 的优先级：
+
+1. **在线桥** `MemoryBridge.resolve_person(umo)`（见 §16.1，权威、实时）；
+2. 在线桥返回 `None` 时 → **共享文件 `index`**（用 `parse_umo(umo)` 取 `(adapter, session_id)`，
+   经 §20.1.1 normalize 后命中）；
+3. 仍未命中 → **本地 `parse_umo()`**（关系键退回 `key.user_id`，行为同 v1.4.0）。
+
+### 20.3 降级契约（硬性）
+
+- **fail-closed**：文件缺失 / 不可读 / JSON 损坏 / `version` 不符 → 空索引，`lookup` 返回 `None`，
+  **绝不抛异常**、绝不影响读路径。
+- **逐字节兼容**：无导出文件时 `resolve_person` 的返回与 `get_proactive_context` 等契约输出
+  与 v1.8.0 **逐字节一致**。
+- **只读、无缓存击穿**：按文件 `st_mtime_ns` 缓存解析结果，文件变更自动重载；
+  结果仍按 umo 做 TTL 缓存（与在线桥同源）。
+- **群聊隔离**：群聊 scope 不查文件、不返回 person。
+
+### 20.4 契约增量
+
+- `get_contract_info().capabilities["identity_map"] = true`（该位表示**能力存在**，
+  实际可用性由运行时是否读到文件决定）。
+- **无新增公开契约方法**；`resolve_person` 为内部读取路径，`person_id` 经由既有
+  可选键（§16.4）输出。**无 schema 变更**。

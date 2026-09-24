@@ -11,6 +11,9 @@ from pathlib import Path
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
 
+#: Cross-plugin shared data directory (sibling of the per-plugin dirs).
+SHARED_DIR_NAME = "_shared"
+
 #: Explicit override used by tests / local tooling.
 DATA_DIR_ENV = "TCOMPANION_DATA_DIR"
 
@@ -37,6 +40,25 @@ def get_plugin_data_dir() -> Path:
 
     root = os.environ.get("ASTRBOT_ROOT") or os.getcwd()
     return Path(root) / "data" / "plugin_data" / PLUGIN_NAME
+
+
+def get_shared_data_dir() -> Path:
+    """Return (and do not create) the cross-plugin shared data directory.
+
+    ``<plugin_data>/_shared`` — a sibling of the per-plugin directories, so
+    tmemory (writer, ``get_astrbot_plugin_data_path()``) and companion-core
+    (reader) resolve the same file on the same machine. ``TCOMPANION_DATA_DIR``
+    relocates the whole tree for tests.
+    """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override).expanduser() / SHARED_DIR_NAME
+
+    if get_astrbot_plugin_data_path is not None:
+        return Path(get_astrbot_plugin_data_path()) / SHARED_DIR_NAME
+
+    root = os.environ.get("ASTRBOT_ROOT") or os.getcwd()
+    return Path(root) / "data" / "plugin_data" / SHARED_DIR_NAME
 
 
 def get_db_path() -> Path:

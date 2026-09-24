@@ -155,10 +155,10 @@ function renderRelationships(data) {
   if (byPerson.size > 0) {
     html += `<p class="section-summary">${esc(t("status.relationships.private", "Private"))}</p>`;
     for (const [personKey, rows] of byPerson) {
-      const multi = rows.length > 1;
-      html += `<div class="rel-group${multi ? " rel-group-suspected" : ""}">`;
-      if (multi) {
-        html += `<div class="rel-group-head"><span class="person-badge">${esc(personKey)}</span><span class="suspect-tag">${esc(t("status.person.suspected", "May be the same person"))}</span></div>`;
+      const showHead = rows.length > 1 || String(personKey) !== String(rows[0].user_id || "");
+      html += `<div class="rel-group">`;
+      if (showHead) {
+        html += `<div class="rel-group-head"><span class="person-badge">${esc(personKey)}</span></div>`;
       }
       html += `<table class="rel-table">${relationshipTableHead()}<tbody>`;
       for (const r of rows) html += relationshipRow(r);
@@ -326,12 +326,6 @@ function unavailableMsg() {
   return `<p class="empty-msg">${esc(t("status.unavailable", "Data is unavailable right now."))}</p>`;
 }
 
-function personReasonLabel(reason) {
-  if (reason === "canonical_suffix") return t("status.person.reason_canonical", "Same account");
-  if (reason === "same_tail") return t("status.person.reason_same_tail", "Same account number");
-  return "";
-}
-
 function setPersonFeedback(kind, message) {
   const el = document.getElementById("person-keys-feedback");
   if (!el) return;
@@ -356,22 +350,20 @@ function errMessage(err, fallback) {
 }
 
 function groupPersonKeys(items) {
+  const byKey = new Map();
+  for (const item of items) {
+    const uid = String(item.user_id || "");
+    if (!uid) continue;
+    const pk = String(item.person_key || uid);
+    if (!byKey.has(pk)) byKey.set(pk, []);
+    byKey.get(pk).push(item);
+  }
   const clusters = new Map();
   const lone = [];
-  for (const item of items) {
-    const suspect = String(item.suspected_person || "");
-    if (suspect) {
-      if (!clusters.has(suspect)) clusters.set(suspect, []);
-      clusters.get(suspect).push(item);
-    } else {
-      lone.push(item);
-    }
-  }
-  for (const [key, members] of clusters) {
-    if (members.length < 2) {
-      for (const m of members) lone.push(m);
-      clusters.delete(key);
-    }
+  for (const [pk, members] of byKey) {
+    const needsCard = members.length > 1 || String(members[0].user_id || "") !== pk;
+    if (needsCard) clusters.set(pk, members);
+    else lone.push(members[0]);
   }
   return { clusters, lone };
 }
@@ -379,8 +371,7 @@ function groupPersonKeys(items) {
 function personMeta(item) {
   const rows = Number(item.rows ?? 0);
   const last = formatDateTime(item.last_active_at);
-  const reason = personReasonLabel(item.suspected_reason);
-  return `<div class="person-meta"><span>${esc(t("status.person.rows", "Records"))}: <strong>${isNaN(rows) ? 0 : rows}</strong></span><span>${esc(t("status.person.last_active", "Last active"))}: ${esc(last)}</span>${reason ? `<span class="reason-tag">${esc(reason)}</span>` : ""}</div>`;
+  return `<div class="person-meta"><span>${esc(t("status.person.rows", "Records"))}: <strong>${isNaN(rows) ? 0 : rows}</strong></span><span>${esc(t("status.person.last_active", "Last active"))}: ${esc(last)}</span></div>`;
 }
 
 function renderPersonKeys(data) {
@@ -393,7 +384,7 @@ function renderPersonKeys(data) {
   const { clusters, lone } = groupPersonKeys(items);
   let html = "";
   let groupIdx = 0;
-  for (const [suspect, members] of clusters) {
+  for (const [personKey, members] of clusters) {
     const gid = `pg-${groupIdx++}`;
     const sorted = [...members].sort((a, b) => {
       const ar = Number(a.rows) || 0;
@@ -401,24 +392,29 @@ function renderPersonKeys(data) {
       if (ar !== br) return br - ar;
       return String(a.user_id).localeCompare(String(b.user_id));
     });
+    const targetIds = [personKey, ...sorted.map((m) => String(m.user_id || ""))].filter(
+      (v, i, arr) => v && arr.indexOf(v) === i
+    );
     html += `<div class="person-cluster" data-cluster="${esc(gid)}">`;
-    html += `<div class="rel-group-head"><span class="person-badge">${esc(suspect)}</span><span class="suspect-tag">${esc(t("status.person.suspected", "May be the same person"))}</span></div>`;
+    html += `<div class="rel-group-head"><span class="person-badge">${esc(personKey)}</span></div>`;
     html += `<label class="field-label" for="${gid}-target">${esc(t("status.person.target", "Merge into"))}</label>`;
     html += `<select id="${gid}-target" class="person-select">`;
-    for (const m of sorted) {
-      const selected = m.user_id === suspect ? " selected" : "";
-      html += `<option value="${esc(m.user_id)}"${selected}>${esc(m.user_id)}</option>`;
+    for (const id of targetIds) {
+      const selected = id === personKey ? " selected" : "";
+      html += `<option value="${esc(id)}"${selected}>${esc(id)}</option>`;
     }
     html += `</select>`;
     html += `<p class="field-label">${esc(t("status.person.aliases", "Select records to merge"))}</p><ul class="person-keys-list">`;
     for (const m of sorted) {
+      const uid = String(m.user_id || "");
+      const precheck = uid !== personKey ? " checked" : "";
       html += `<li class="person-key-row">
-        <label><input type="checkbox" class="alias-check" value="${esc(m.user_id)}" data-persona="${esc(m.persona_id)}" /> <code>${esc(m.user_id)}</code></label>
+        <label><input type="checkbox" class="alias-check" value="${esc(uid)}" data-persona="${esc(m.persona_id)}"${precheck} /> <code>${esc(uid)}</code></label>
         ${personMeta(m)}
       </li>`;
     }
     html += `</ul>`;
-    html += `<button type="button" class="btn btn-merge" data-cluster="${esc(gid)}" data-suspect="${esc(suspect)}">${esc(t("status.person.merge", "Merge"))}</button>`;
+    html += `<button type="button" class="btn btn-merge" data-cluster="${esc(gid)}" data-person-key="${esc(personKey)}">${esc(t("status.person.merge", "Merge"))}</button>`;
     html += `</div>`;
   }
   if (lone.length > 0) {

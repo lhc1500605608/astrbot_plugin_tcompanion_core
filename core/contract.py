@@ -105,7 +105,7 @@ logger = logging.getLogger(__name__)
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.9.0"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -245,6 +245,8 @@ class ContractV1:
                 "life_content": True,
                 # additive v1.8 key; the map shape stays dict[str, bool]
                 "person_merge": True,
+                # additive v1.9 key; read-only offline identity_map.json fallback
+                "identity_map": True,
             },
             # additive v1.2: the effective open_thread group (defaults applied)
             "open_thread": self._open_thread_config().to_dict(),

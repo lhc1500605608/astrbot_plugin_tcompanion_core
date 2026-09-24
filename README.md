@@ -1,6 +1,6 @@
 # Hearthlight · 守灯
 
-<p><img alt="version" src="https://img.shields.io/badge/version-1.8.0-blue"></p>
+<p><img alt="version" src="https://img.shields.io/badge/version-1.9.0-blue"></p>
 
 <div align="center">
   <img src="./logo.png" alt="Hearthlight · 守灯" width="180">

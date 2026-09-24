@@ -13,6 +13,12 @@ two public read-only methods when they exist:
   (``person_id`` = the memory plugin's ``canonical_user_id``). Only the private
   ``person_id`` is consumed here; a group scope or an older plugin without the
   method degrades to ``None`` so callers fall back to ``parse_umo``.
+  **v1.9**: when the online bridge yields ``None`` (plugin missing/disabled/
+  timeout/error/empty) the shared ``_shared/identity_map.json`` export is
+  consulted as an offline fallback (``(adapter, adapter_user_id)`` from
+  ``parse_umo``); a hit returns the same canonical Person. A missing/corrupt
+  file degrades to ``None`` exactly as before, so behaviour stays byte-identical
+  when no export exists.
 
 Invariants (see ``docs/CONTRACT.md`` §14):
 
@@ -35,6 +41,9 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+
+from .identity_map import IdentityMap
+from .relationship import parse_umo
 
 #: Plugin name resolved from the AstrBot star registry by default.
 DEFAULT_MEMORY_PLUGIN_NAME = "astrbot_plugin_tmemory"
@@ -154,16 +163,27 @@ class MemoryBridge:
     monotonic source for TTL bookkeeping (overridable in tests).
     """
 
-    def __init__(self, context, config=None, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        context,
+        config=None,
+        clock: Callable[[], float] | None = None,
+        identity_map: IdentityMap | None = None,
+    ) -> None:
         self._context = context
         self._config = config
         self._clock = clock or time.monotonic
+        # v1.9 offline fallback: an injected map (tests) wins, else the shared
+        # export is resolved lazily on first use.
+        self._identity_map = identity_map
+        self._identity_map_ready = identity_map is not None
         # cache key -> (expires_at, payload | None); payload is a dict for
         # ``fetch`` and a person-id str for ``resolve_person``
         self._cache: dict[str, tuple[float, dict | str | None]] = {}
         self.hits = 0
         self.degrades = 0
         self.timeouts = 0
+        self.offline_hits = 0
 
     # -- config / resolution ------------------------------------------------
     def config(self) -> MemoryBridgeConfig:
@@ -270,6 +290,12 @@ class MemoryBridge:
         group scope, timeout, error or empty result all return ``None`` — the
         caller then falls back to ``parse_umo()`` and behaves exactly as v1.4.0.
 
+        **v1.9 offline fallback**: when the online bridge yields no person the
+        shared ``_shared/identity_map.json`` export (written by tmemory) is
+        consulted by ``(adapter, adapter_user_id)``, so the same canonical
+        Person still resolves when tmemory is offline / unavailable. A
+        missing/corrupt file degrades to ``None`` exactly as before.
+
         The result is cached under the ``umo`` for ``ttl_min`` (a negative
         ``None`` is cached too), so a burst of messages never queries per-message.
         """
@@ -286,31 +312,9 @@ class MemoryBridge:
                 return payload
             return None
 
-        star = self._resolve_star(cfg.plugin_name)
-        if star is None:
-            self.degrades += 1
-            self._cache_put(key, None, cfg.ttl_min)
-            return None
-        resolver = getattr(star, "resolve_person", None)
-        if not callable(resolver):
-            self.degrades += 1
-            self._cache_put(key, None, cfg.ttl_min)
-            return None
-        try:
-            raw = await asyncio.wait_for(resolver(umo), timeout=cfg.timeout_sec)
-        except asyncio.TimeoutError:
-            self.timeouts += 1
-            self.degrades += 1
-            self._cache_put(key, None, cfg.ttl_min)
-            return None
-        except Exception:
-            self.degrades += 1
-            self._cache_put(key, None, cfg.ttl_min)
-            return None
-
-        person_id = ""
-        if isinstance(raw, dict) and not raw.get("is_group"):
-            person_id = str(raw.get("person_id") or "").strip()
+        person_id = await self._resolve_person_online(umo, cfg)
+        if not person_id:
+            person_id = self._resolve_person_offline(umo)
         if not person_id:
             self.degrades += 1
             self._cache_put(key, None, cfg.ttl_min)
@@ -318,6 +322,58 @@ class MemoryBridge:
         self.hits += 1
         self._cache_put(key, person_id, cfg.ttl_min)
         return person_id
+
+    async def _resolve_person_online(self, umo: str, cfg: MemoryBridgeConfig) -> str:
+        """Online ``star.resolve_person(umo)`` → person_id (``""`` on failure)."""
+        star = self._resolve_star(cfg.plugin_name)
+        if star is None:
+            return ""
+        resolver = getattr(star, "resolve_person", None)
+        if not callable(resolver):
+            return ""
+        try:
+            raw = await asyncio.wait_for(resolver(umo), timeout=cfg.timeout_sec)
+        except asyncio.TimeoutError:
+            self.timeouts += 1
+            return ""
+        except Exception:
+            return ""
+        if isinstance(raw, dict) and not raw.get("is_group"):
+            return str(raw.get("person_id") or "").strip()
+        return ""
+
+    def _resolve_person_offline(self, umo: str) -> str:
+        """Shared-map fallback keyed by ``parse_umo`` (fail-closed, ``""``).
+
+        ``IdentityMap.lookup`` normalizes the UMO ``session_id`` to the
+        authority's ``adapter_user_id`` (e.g. WebChat ``webchat!<user>!<conv>``
+        → ``<user>``), so both sides resolve the same Person (v1.9).
+        """
+        mapper = self._resolve_identity_map()
+        if mapper is None:
+            return ""
+        try:
+            parsed = parse_umo(umo)
+        except Exception:
+            return ""
+        if parsed.is_group:
+            return ""
+        person_id = mapper.lookup(parsed.platform, parsed.session_id)
+        if person_id:
+            self.offline_hits += 1
+            return person_id
+        return ""
+
+    def _resolve_identity_map(self) -> IdentityMap | None:
+        """Lazily build the shared-map reader; ``None`` if it cannot be built."""
+        if self._identity_map_ready:
+            return self._identity_map
+        try:
+            self._identity_map = IdentityMap()
+        except Exception:
+            self._identity_map = None
+        self._identity_map_ready = True
+        return self._identity_map
 
     async def _read_snippets(
         self, star, umo: str, query: str, session_type: str, cfg: MemoryBridgeConfig
@@ -400,4 +456,9 @@ class MemoryBridge:
     # -- observability ------------------------------------------------------
     def stats(self) -> dict:
         """Read-only counters (no content). Used by panels/tests."""
-        return {"hit": self.hits, "degrade": self.degrades, "timeout": self.timeouts}
+        return {
+            "hit": self.hits,
+            "degrade": self.degrades,
+            "timeout": self.timeouts,
+            "offline_hit": self.offline_hits,
+        }

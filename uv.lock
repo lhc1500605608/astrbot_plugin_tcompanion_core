@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "astrbot-plugin-tcompanion-core"
-version = "1.8.0"
+version = "1.9.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

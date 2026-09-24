@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-09-24
+
+### Added
+- **Shared identity map (offline person fallback)**: read-only consumption of
+  `<plugin_data>/_shared/identity_map.json` (single writer: tmemory). When the
+  online bridge yields no person, `resolve_person` looks up the normalized
+  `(adapter, adapter_user_id)` — WebChat `webchat!<user>!<conv>` decoded to the
+  sender id. **Fail-closed** (missing/corrupt/wrong-version → `None`), mtime
+  cached, groups never touch the file; without an export file every contract
+  output is byte-identical to v1.8.0. `docs/CONTRACT.md` §20.
+- `capabilities["identity_map"] = true` (additive key; `api_version` stays `1`,
+  no schema change — still `8`).
+- Tests: `tests/test_identity_map.py`.
+
+### Changed
+- Status panel person/merge cards group rows by `person_key` and drop the
+  "may be the same person" heuristic labels; merge target preselects the
+  canonical key (i18n cleanup in en/zh).
+
+## [1.8.0] - 2026-09-24
+
+### Added
+- **Person merge**: WebUI People/Merge card (`POST /person/merge` + rollback),
+  bind-time migrate/prompt, `Store.migrate/judge/list_person_key_candidates`
+  helpers; `capabilities["person_merge"] = true` (additive, `api_version` stays
+  `1`, no schema change). Tests: `tests/test_person_merge.py`.
+
+## [1.7.0] - 2026-09-24
+
+### Added
+- **Life content (见闻)**: `get_life_content` / `refresh_life_content`,
+  `life_content` table (schema `7 → 8`, pure additive), `content` config group
+  (off by default), bounded generation with SSRF guard and optional
+  summarizer; `capabilities["life_content"] = true`. `docs/CONTRACT.md` §19.
+  Tests: `tests/test_life_content.py`.
+
 ## [1.6.0] - 2026-09-23
 
 ### Added

@@ -10,7 +10,6 @@
   "status": {
     "title": "Hearthlight Status",
     "loading": "Loading…",
-    "error": "Error loading data: {message}",
     "unavailable": "Data is unavailable right now.",
     "group": {
       "title": "Group Chats",
@@ -37,7 +36,6 @@
       "level": "Level",
       "progress": "Progress",
       "traits": "Traits",
-      "persona": "Persona",
       "user": "User"
     },
     "life_state": {
@@ -60,22 +58,17 @@
       "yes": "Yes",
       "no": "No",
       "private": "Private",
-      "groups": "Groups",
-      "person": "Person"
+      "groups": "Groups"
     },
     "person": {
       "title": "People / Merge",
       "empty": "No relationship keys yet.",
-      "suspected": "May be the same person",
-      "reason_canonical": "Same account",
-      "reason_same_tail": "Same account number",
       "rows": "Records",
       "last_active": "Last active",
       "target": "Merge into",
       "aliases": "Select records to merge",
       "merge": "Merge",
       "rollback": "Undo last merge",
-      "merging": "Working…",
       "select_one": "Select at least one record to merge.",
       "merge_ok": "Merge complete.",
       "merge_fail": "Merge failed: {message}",

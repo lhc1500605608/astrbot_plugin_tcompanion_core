@@ -10,7 +10,6 @@
   "status": {
     "title": "Hearthlight · 状态",
     "loading": "加载中…",
-    "error": "加载失败：{message}",
     "unavailable": "数据暂不可用。",
     "group": {
       "title": "群聊",
@@ -37,7 +36,6 @@
       "level": "等级",
       "progress": "进度",
       "traits": "特质",
-      "persona": "人设",
       "user": "用户"
     },
     "life_state": {
@@ -60,22 +58,17 @@
       "yes": "是",
       "no": "否",
       "private": "私聊",
-      "groups": "群聊",
-      "person": "人物"
+      "groups": "群聊"
     },
     "person": {
       "title": "人物 / 合并",
       "empty": "暂无关系键。",
-      "suspected": "可能是同一人",
-      "reason_canonical": "同一账号",
-      "reason_same_tail": "尾号相同",
       "rows": "数据条数",
       "last_active": "最近活跃",
       "target": "合并到",
       "aliases": "选择要合并的记录",
       "merge": "合并",
       "rollback": "回滚上次合并",
-      "merging": "处理中…",
       "select_one": "请至少选择一条要合并的记录。",
       "merge_ok": "合并完成。",
       "merge_fail": "合并失败：{message}",

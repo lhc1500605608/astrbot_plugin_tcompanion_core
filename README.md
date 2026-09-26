@@ -1,81 +1,55 @@
 # Hearthlight · 守灯
 
-<p><img alt="version" src="https://img.shields.io/badge/version-1.10.0-blue"></p>
-
 <div align="center">
   <img src="./logo.png" alt="Hearthlight · 守灯" width="180">
 </div>
 
-Hearthlight · 守灯核心基座：为 AstrBot 提供持久化的关系好感度、生活状态与情绪表达档位，
-供上层插件（如 kanjyou）读取使用。
+[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/lhc1500605608/astrbot_plugin_tcompanion_core)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.23%2C%3C5-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 
-## 能力
+[**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 的陪伴核心基座：为机器人提供持久化的**关系好感度、生活状态与情绪表达档位**，供上层插件（如 WarmWhisper · 暖语）读取使用。
 
-- 关系好感度与互动统计：按对话累积好感度，带每日上下限；**不保存消息原文**。
-- 生活状态与日程：生成角色当天的活动、精力、场景与一句话摘要。
-- 情绪事件与表达档位：根据对话识别感谢、误解、敷衍等情绪，输出对应的表达档位；
-  **群聊不会出现亲密档位**，也不继承私聊情绪。
-- 可选记忆桥接：若安装了记忆插件（如 tmemory），只读获取其用户画像与回忆，让主动
-  内容与语气更贴合对方；未安装或读取失败时自动忽略，行为与未开启时完全一致，
-  群聊不会使用画像。
-- 生活线：可选地带上天气（填城市后自动查询）、用餐、作息与昨日小结，并在休息时段
-  不主动打扰；未填城市或查询失败时自动忽略。**群聊不暴露**任何生活线信息，
-  只保存结构化字段，不保存消息原文。
-- 群聊理解：了解群的整体活跃度、话题与群内成员熟悉度，并按最短接话间隔、每小时
-  次数与群繁忙程度给出**是否适合接话**的建议；群内状态**独立**，不读取也不混入
-  私聊关系、情绪或画像，保存的只有计数与短标签。
-- 成长：随相处与互动，人物的表达暖度会缓慢提升；有等级上限、可随时清零，关闭后
-  回到未开启时的行为。
-- 见闻：可选地让角色拥有自己的生活素材——按配置的 RSS/Atom 来源或手填话题，低频
-  生成**无原文**的短见闻，供主动消息作话题候选；默认关，开启后受每日条数与刷新
-  间隔限制，取源失败自动忽略。见闻**不绑用户身份**、不外发用户数据。
-- 对外接口（契约）：`get_contract_info()` / `get_proactive_context()` /
-  `get_life_state()` / `get_relationship()` / `record_emotion_event()` /
-  `get_emotion_context()` / `expression_decision()` / `get_life_line()` /
-  `get_diary()` / `record_group_activity()` / `get_group_context()` /
-  `get_growth_context()` / `get_life_content()` / `refresh_life_content()`，
-  全部异步、缺失数据时自动降级。
-- 本插件**不主动发消息、不自起调度器**，仅提供数据与决策。
+> 本插件**不主动发消息、不自起调度器**，只提供数据与决策。
 
-## 界面
+## 它能做什么
 
-- 状态面板：`pages/status`，可查看各角色的好感度与生活状态。
+- **关系**：按互动累积好感度与相处阶段（有每日上下限），并可随相处缓慢成长。
+- **生活状态**：生成角色当天的心情、精力、场景与一句话小结；可选天气、用餐与作息，并支持休息时段不打扰。
+- **情绪与表达**：识别对话中的情绪事件，输出相应的表达档位（语气 / 长度 / 主动度）。
+- **群聊理解**：感知群活跃度与话题氛围，给出"是否适合接话"的建议。
+- **见闻**：可选地让角色拥有自己的生活素材（RSS/话题），低频生成无原文的短见闻，供主动消息作话题候选。
+- **可选记忆桥接**：已安装记忆插件（如 MemoryForge · 铸忆）时，只读获取用户画像与回忆，让表达更贴合对方；缺失时自动忽略。
 
-## 开发
+## 安装
 
-```bash
-uv venv .venv
-uv pip install --python .venv pytest pytest-asyncio ruff
+1. 在 AstrBot 插件市场安装，或克隆本仓库到 AstrBot 的插件目录。
+2. 在 AstrBot WebUI 启用插件。
+3. 按需在配置中开启生活线、成长、见闻等可选能力（默认安全、低打扰）。
 
-.venv/bin/ruff check .        # 全绿
-.venv/bin/python -m pytest    # 单测
-```
+## 常用配置
 
-## 目录
+- **生活线**：填入城市后自动查询天气，可选用餐、作息与昨日小结，休息时段不打扰。
+- **成长**：随相处与互动缓慢提升表达暖度，有等级上限、可随时清零。
+- **见闻**：配置 RSS / 话题来源，低频生成短见闻作话题候选（默认关）。
+- **记忆桥接**：已安装记忆插件时自动只读获取画像，无需配置；缺失时自动忽略。
 
-```
-main.py            # Star 骨架（context 持有、DB 初始化、诊断指令）
-core/contract.py   # 对外接口（契约）
-core/db.py         # SQLite 建表与迁移
-core/store.py      # 存储读写（仅派生值，无消息原文）
-core/life_state.py # 生活状态与周模板日程
-core/life_line.py  # 生活线：配置/时间窗/作息推断/日记合成
-core/weather.py    # 天气查询（免 key，失败自动忽略）
-core/emotion.py    # 情绪事件与表达档位
-core/group.py      # 群聊理解：群/成员派生与参与闸门
-core/growth.py     # 成长：由既有账本派生等级与表达漂移
-core/memory_bridge.py # 记忆插件的只读桥接（可选）
-core/kanjyou.py    # kanjyou 接入门禁
-_conf_schema.json  # emotion / expression / open_thread / memory_bridge / life_line / group / growth 配置组
-docs/CONTRACT.md   # 接口字段与降级说明
-tests/             # 单测
-```
+## 使用
 
-## 约束
+- **状态面板**：在 AstrBot WebUI 的 Plugin Pages 查看各角色的好感度与生活状态。
+- 本插件通常**不单独使用**：由上层插件（暖语）读取其上下文，或直接调用其只读接口。
+- 可选搭配：`MemoryForge · 铸忆`（记忆画像）、`WarmWhisper · 暖语`（主动表达）。
 
-- 只读取记忆插件的公开接口，不写入、不保存消息原文；未安装记忆插件时不受影响。
-- 群聊不记好感度、不出现亲密档位，也不使用用户画像；群内熟悉度独立记录，
-  不与私聊关系合并，也不跨群聚合。
-- 本插件不主动发消息、不自己起调度器。
+## 隐私与安全
 
-接口字段、可缺省性与降级矩阵见 **[docs/CONTRACT.md](docs/CONTRACT.md)**。
+- 只保存**结构化派生值**，**不保存消息原文**。
+- **群聊独立**：群内不出现亲密档位、不读取也不混入私聊的关系 / 情绪 / 画像，也不跨群聚合；群内成员为局部匿名键。
+- 生活线等私聊信息**不进入群聊**。
+
+## 兼容性
+
+- AstrBot `>=4.23,<5`。
+- 可选依赖（记忆 / 上层插件）缺失或超时时自动降级，不影响正常运行。
+
+## 许可
+
+GNU AGPL-3.0（见 [`LICENSE`](./LICENSE)）。版本与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。

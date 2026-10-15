@@ -53,3 +53,8 @@
 ## 许可
 
 GNU AGPL-3.0（见 [`LICENSE`](./LICENSE)）。版本与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
+
+
+## 新版 WebUI 预览（v1.10.2）
+
+新版界面源码、测试和静态构建位于 [webui/](webui/README.md)，包含八个页面、响应式布局、演示数据及宿主适配层。当前默认插件页面 pages/status/ 保持原实现；新版尚未通过真实宿主集成验证，也未部署生产。可在 webui/ 内运行 npm ci --ignore-scripts 和 npm run dev 进行本地预览。

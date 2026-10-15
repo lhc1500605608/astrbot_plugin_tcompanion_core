@@ -4,7 +4,7 @@
   <img src="./logo.png" alt="Hearthlight · 守灯" width="180">
 </div>
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/lhc1500605608/astrbot_plugin_tcompanion_core)
+[![Version](https://img.shields.io/badge/version-1.10.3-blue.svg)](https://github.com/lhc1500605608/astrbot_plugin_tcompanion_core)
 [![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.23%2C%3C5-green.svg)](https://github.com/AstrBotDevs/AstrBot)
 
 [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 的陪伴核心基座：为机器人提供持久化的**关系好感度、生活状态与情绪表达档位**，供上层插件（如 WarmWhisper · 暖语）读取使用。
@@ -55,6 +55,8 @@
 GNU AGPL-3.0（见 [`LICENSE`](./LICENSE)）。版本与变更历史见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 
-## 新版 WebUI 预览（v1.10.2）
+## 新版 WebUI（v1.10.3）
 
 新版界面源码、测试和静态构建位于 [webui/](webui/README.md)，包含八个页面、响应式布局、演示数据及宿主适配层。当前默认插件页面 pages/status/ 保持原实现；新版尚未通过真实宿主集成验证，也未部署生产。可在 webui/ 内运行 npm ci --ignore-scripts 和 npm run dev 进行本地预览。
+
+新版界面源码位于 `webui/`，构建后运行 `npm run sync:plugin-page` 同步至 `pages/status/`。生产已接入新版入口；同步产物内联 JS/CSS，避免嵌套资源丢失 asset_token。已验证真实宿主连接、路由和成长数据。

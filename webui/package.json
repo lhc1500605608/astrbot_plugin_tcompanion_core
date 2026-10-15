@@ -7,10 +7,11 @@
     "dev": "vite --host 127.0.0.1 --port 8787",
     "build": "tsc --noEmit && vite build",
     "build:dev": "vite build --mode development",
+    "sync:plugin-page": "node scripts/sync-plugin-page.mjs",
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/*.test.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -89,5 +90,5 @@
     "vite": "8.1.5",
     "vitest": "^4.1.10"
   },
-  "version": "1.10.2-preview.2"
+  "version": "1.10.3-preview.2"
 }

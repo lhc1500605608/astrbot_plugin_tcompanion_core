@@ -1,6 +1,6 @@
 # Hearthlight · 守灯 WebUI
 
-沿用 Lovable 首版设计并在本地补完的可交互新版界面。预览版本 `1.10.2-preview.2`。
+沿用 Lovable 首版设计并在本地补完的可交互新版界面。源码版本 `1.10.3-preview.2`。
 
 ## 运行
 
@@ -14,6 +14,7 @@ npm run dev
 ```sh
 npm run build
 npm test
+npm run sync:plugin-page
 ```
 
 构建输出 `dist/` 为静态资源；独立部署需要为前端路由配置 index.html fallback。当前并未嵌入或部署到生产 AstrBot。
@@ -35,10 +36,12 @@ npm test
 
 真实宿主适配代码在 `src/lib/hearthlight/host.ts`，支持现有 life-state、relationships、emotion-state、group-state、growth-state、motivation-log、person/keys 和迁移/回滚端点，并检查响应结构；未做真实宿主集成验收。界面中的昵称、部分群活跃度/成长字段是演示可选字段，宿主没有时显示原始 ID/缺省状态，不制造数据。
 
-本仓库版本为 Hearthlight v1.10.2；生产仍为 Hearthlight v1.10.1、WarmWhisper v2.13.3、tmemory v0.17.0。新版界面位于 webui/，尚未替换 pages/status/，部署到 AstrBot 前须完成真实宿主集成验证。
+构建后通过 `sync:plugin-page` 将静态文件复制到插件实际页面目录 `pages/status/`。在本地 AstrBot 中以有权限的管理会话打开 `/api/plugin/page/content/astrbot_plugin_tcompanion_core/status/`；宿主注入的 `window.AstrBotPluginPage` 就绪后，页面会使用真实插件 API。hash 路由让八个子页面和刷新/深链都留在这一静态页面内。独立打开时才会显示演示模式；若检测到 SDK 但 `ready()` 失败，页面会显示连接错误并要求用户主动选择演示模式。
+
+插件版本 v1.10.3 对应此本地集成；生产仍为 Hearthlight v1.10.1、WarmWhisper v2.13.4、tmemory v0.17.0。静态包已集成进插件文件树，但尚未在真实本地 AstrBot 宿主中完成页面验收，也未部署生产。
 
 ## 设计来源与验证
 
 Lovable 项目 `9aa8e69e-e35f-47b4-9d74-38112b4cd682`，首稿 commit `e8f81bf09542346c96e1b6cb27ba1a98fdeb3c54`。Lovable 额度耗尽后，用户授权本地接手。移除不需要的云端 SSR/数据库依赖，保留组件、配色和适配架构；原 SSR 入口存放 `provenance/`。
 
-类型检查/生产构建通过；4 个测试文件、9 项测试通过。浏览器已验证搜索隔离、详情、演示迁移双重确认/回滚、错误状态、主题切换和手机导航，见 LOCAL_VERIFICATION.md。验收截图保存在原工作区的 prototypes/hearthlight-lovable/screenshots/，未纳入本目录。
+类型检查/生产构建通过；源 UI 的交互验收记录见 LOCAL_VERIFICATION.md。宿主字段映射、hash 路由和 SDK 响应由 Vitest 覆盖；插件页静态构建由 `npm run sync:plugin-page` 生成并纳入版本控制。浏览器中的本地独立预览不等于 AstrBot 宿主验收。

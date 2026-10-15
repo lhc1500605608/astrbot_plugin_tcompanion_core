@@ -24,7 +24,6 @@ import {
   identityKind,
   IDENTITY_LABEL,
   modeInfo,
-  phaseLabel,
 } from "@/lib/hearthlight/labels";
 import type { RelationshipItem } from "@/lib/hearthlight/types";
 export const Route = createFileRoute("/relationships")({ component: Relationships });
@@ -195,8 +194,9 @@ function Relationships() {
               <KV
                 items={[
                   ["表达模式", emotion ? modeInfo(emotion.mode).label : "暂无记录"],
-                  ["成长阶段", phaseLabel(gr?.phase)],
-                  ["成长说明", String(gr?.note ?? "暂无说明")],
+                  ["成长等级", gr ? `${gr.level} / ${gr.max_level}` : "暂无记录"],
+                  ["成长进度", gr ? `${Math.round(gr.progress * 100)}%` : "—"],
+                  ["成长标签", gr?.traits.length ? gr.traits.join("、") : "暂无"],
                 ]}
               />
             </Panel>

@@ -209,3 +209,7 @@ __marimo__/
 # AstrBot runtime data (local only)
 data/
 body447.json
+
+# Frontend source is not a Python build library.
+!webui/src/lib/
+!webui/src/lib/**

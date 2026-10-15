@@ -64,6 +64,15 @@ function NavList({ onNavigate }: { onNavigate?: (() => void) | undefined }) {
 }
 
 function SidebarBody({ onNavigate }: { onNavigate?: (() => void) | undefined }) {
+  const { connection } = useHL();
+  const pageState =
+    connection.status === "host"
+      ? "宿主已连接"
+      : connection.status === "demo"
+        ? "本地演示"
+        : connection.status === "error"
+          ? "连接失败"
+          : "正在连接";
   return (
     <div className="flex h-full flex-col">
       <Link to="/" onClick={onNavigate} className="flex items-center gap-2.5 px-4 pt-5 pb-6">
@@ -78,9 +87,9 @@ function SidebarBody({ onNavigate }: { onNavigate?: (() => void) | undefined }) 
       </div>
       <div className="space-y-3 border-t border-sidebar-border px-4 py-4 text-xs">
         <div className="flex items-center justify-between text-muted-foreground">
-          <span>仓库 v1.10.2</span>
+          <span>仓库 v1.10.3</span>
           <span className="rounded bg-amber-soft px-1.5 py-0.5 text-amber-foreground">
-            新版界面预览
+            {pageState}
           </span>
         </div>
         <div className="space-y-1">

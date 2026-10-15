@@ -2,25 +2,27 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Sprout } from "lucide-react";
 import { PageHeader, Panel, QueryView, Meter, Tag, EmptyState } from "@/components/hl/primitives";
-import { SearchField, Filter, Details, RawDetails } from "@/components/hl/records";
+import { SearchField, Filter, Details, RawDetails, IdentityText } from "@/components/hl/records";
 import { useGrowth, usePersonaName } from "@/lib/hearthlight/context";
-import { phaseLabel, fmtTime } from "@/lib/hearthlight/labels";
 import type { GrowthItem } from "@/lib/hearthlight/types";
+
 export const Route = createFileRoute("/growth")({ component: Growth });
+
 function Growth() {
-  const q = useGrowth(),
-    name = usePersonaName();
-  const [search, S] = useState(""),
-    [persona, P] = useState("all"),
-    [selected, D] = useState<GrowthItem | null>(null);
+  const q = useGrowth();
+  const name = usePersonaName();
+  const [search, S] = useState("");
+  const [persona, P] = useState("all");
+  const [selected, D] = useState<GrowthItem | null>(null);
+
   return (
     <>
       <PageHeader
         title="成长"
-        desc="关系在日常互动中缓慢积累。只展示当前推导状态，不编造历史趋势。"
+        desc="由既有关系账目确定性派生的等级与短标签；无趋势回放，也不引入新写入。"
       />
       <div className="mb-5 flex gap-2">
-        <SearchField value={search} onChange={S} />
+        <SearchField value={search} onChange={S} placeholder="搜索身份或人格" />
         <Filter
           label="人格"
           value={persona}
@@ -33,43 +35,42 @@ function Growth() {
           const rows = data.filter(
             (i) =>
               (persona === "all" || i.persona_id === persona) &&
-              [i.user_id, i.persona_id, i.note].join(" ").includes(search),
+              [i.user_id, i.persona_id, ...i.traits].join(" ").includes(search),
           );
           return rows.length ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {rows.map((g, i) => (
+              {rows.map((g) => (
                 <Panel
-                  key={g.persona_id + g.user_id + i}
+                  key={g.persona_id + "|" + g.user_id}
                   title={name(g.persona_id)}
                   icon={<Sprout className="size-4" />}
-                  actions={<Tag>{phaseLabel(g.phase)}</Tag>}
+                  actions={
+                    <Tag>
+                      Lv {g.level} / {g.max_level}
+                    </Tag>
+                  }
                 >
-                  <code className="block break-all text-xs text-muted-foreground">{g.user_id}</code>
-                  <p className="my-4 min-h-10 text-sm">
-                    {g.note ?? "尚无成长说明，保留当前记录。"}
-                  </p>
-                  {typeof g.trust === "number" && (
-                    <div className="mb-3">
-                      <p className="mb-1 text-xs text-muted-foreground">
-                        信任 {Math.round(g.trust * 100)}%
-                      </p>
-                      <Meter label="信任" value={g.trust} />
+                  <IdentityText value={g.user_id} />
+                  <div className="mt-4">
+                    <div className="mb-1 flex justify-between text-xs text-muted-foreground">
+                      <span>本级进度</span>
+                      <span>{Math.round(g.progress * 100)}%</span>
                     </div>
-                  )}
-                  {typeof g.familiarity === "number" && (
-                    <div>
-                      <p className="mb-1 text-xs text-muted-foreground">
-                        熟悉 {Math.round(g.familiarity * 100)}%
-                      </p>
-                      <Meter label="熟悉" value={g.familiarity} tone="amber" />
-                    </div>
-                  )}
-                  <div className="mt-4 flex justify-between text-xs text-muted-foreground">
-                    <span>{fmtTime(g.updated_at)}</span>
-                    <button className="text-primary underline" onClick={() => D(g)}>
-                      原始字段
-                    </button>
+                    <Meter value={g.progress} label="本级进度" />
                   </div>
+                  <div className="mt-4 flex flex-wrap gap-1.5">
+                    {g.traits.length ? (
+                      g.traits.map((trait) => <Tag key={trait}>{trait}</Tag>)
+                    ) : (
+                      <span className="text-xs text-muted-foreground">暂无标签</span>
+                    )}
+                  </div>
+                  <button
+                    className="mt-4 text-xs text-primary underline underline-offset-4"
+                    onClick={() => D(g)}
+                  >
+                    查看原始字段
+                  </button>
                 </Panel>
               ))}
             </div>
@@ -79,7 +80,7 @@ function Growth() {
         }}
       </QueryView>
       <Details title="成长记录" open={!!selected} onClose={() => D(null)}>
-        {selected && <RawDetails record={selected} />}
+        {selected && <RawDetails record={selected as unknown as Record<string, unknown>} />}
       </Details>
     </>
   );

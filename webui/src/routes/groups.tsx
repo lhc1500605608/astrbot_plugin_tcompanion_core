@@ -1,80 +1,120 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Users } from "lucide-react";
-import { PageHeader, Panel, QueryView, Tag, Meter, EmptyState } from "@/components/hl/primitives";
+import { PageHeader, Panel, QueryView, Tag, EmptyState } from "@/components/hl/primitives";
 import { SearchField, Filter, Details, RawDetails } from "@/components/hl/records";
-import { useGroups, usePersonaName } from "@/lib/hearthlight/context";
-import { ADVISORY, fmtRel } from "@/lib/hearthlight/labels";
+import { useGroups } from "@/lib/hearthlight/context";
+import {
+  activityLevelInfo,
+  groupReasonLabel,
+  fmtTime,
+  fmtRel,
+} from "@/lib/hearthlight/labels";
 import type { GroupItem } from "@/lib/hearthlight/types";
+
 export const Route = createFileRoute("/groups")({ component: Groups });
+
+function topicAge(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value < 1) return "刚刚";
+  if (value < 60) return `${Math.round(value)} 分钟前`;
+  if (value < 1440) return `${Math.floor(value / 60)} 小时前`;
+  return `${Math.floor(value / 1440)} 天前`;
+}
+
 function Groups() {
-  const q = useGroups(),
-    name = usePersonaName();
-  const [search, S] = useState(""),
-    [advice, A] = useState("all"),
-    [selected, D] = useState<GroupItem | null>(null);
+  const q = useGroups();
+  const [search, S] = useState("");
+  const [activity, A] = useState("all");
+  const [allow, V] = useState("all");
+  const [selected, D] = useState<GroupItem | null>(null);
+
   return (
     <>
       <PageHeader
         title="群聊"
-        desc="观察群内节奏，提供参与建议。建议不代表投递授权，也不包含私聊关系数据。"
+        desc="只展示群内轻量状态与参与建议，不包含私聊关系或人物画像。"
       />
       <div className="mb-5 flex flex-wrap gap-2">
-        <SearchField value={search} onChange={S} placeholder="搜索群名称或完整 UMO" />
+        <SearchField value={search} onChange={S} placeholder="搜索完整 UMO 或话题" />
+        <Filter
+          label="活跃度"
+          value={activity}
+          onChange={A}
+          options={[
+            ["low", "安静"],
+            ["medium", "中等"],
+            ["high", "活跃"],
+          ]}
+        />
         <Filter
           label="建议"
-          value={advice}
-          onChange={A}
-          options={Object.entries(ADVISORY).map(([v, i]) => [v, i.label])}
+          value={allow}
+          onChange={V}
+          options={[
+            ["yes", "可以参与"],
+            ["no", "暂缓参与"],
+          ]}
         />
       </div>
       <QueryView q={q} isEmpty={(d) => !d.length}>
         {(data) => {
           const rows = data.filter(
             (g) =>
-              (!search || [g.group_name, g.group_id].join(" ").includes(search)) &&
-              (advice === "all" || g.advisory === advice),
+              (!search || [g.umo, g.topic].join(" ").includes(search)) &&
+              (activity === "all" || g.activity_level === activity) &&
+              (allow === "all" || (g.allow ? "yes" : "no") === allow),
           );
           return rows.length ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {rows.map((g, i) => (
-                <Panel
-                  key={g.group_id ?? i}
-                  title={
-                    <button className="text-left hover:underline" onClick={() => D(g)}>
-                      {g.group_name ?? g.group_id ?? "未知群聊"}
-                    </button>
-                  }
-                  icon={<Users className="size-4" />}
-                  actions={
-                    <Tag tone={ADVISORY[g.advisory ?? ""]?.tone ?? "muted"}>
-                      {ADVISORY[g.advisory ?? ""]?.label ?? "暂无建议"}
-                    </Tag>
-                  }
-                >
-                  <p className="mb-4 text-xs text-muted-foreground">
-                    {name(g.persona_id)} · {fmtRel(g.last_active_at)}
-                  </p>
-                  <div className="mb-4 flex justify-between text-sm">
-                    <span>
-                      活跃成员 <b>{g.active_members ?? "—"}</b>
-                    </span>
-                    <span>
-                      消息 / 小时 <b>{g.messages_per_hour ?? "—"}</b>
-                    </span>
-                  </div>
-                  {typeof g.activity === "number" && <Meter value={g.activity} label="群活跃度" />}
-                  <p className="mt-4 text-sm text-muted-foreground">
-                    {g.advisory_reason ?? "暂无建议原因"}
-                  </p>
-                  <button
-                    className="mt-4 text-xs text-primary underline underline-offset-4"
-                    onClick={() => D(g)}
+              {rows.map((g) => {
+                const activityInfo = activityLevelInfo(g.activity_level);
+                return (
+                  <Panel
+                    key={g.umo}
+                    title={
+                      <button
+                        className="max-w-full truncate text-left hover:underline"
+                        onClick={() => D(g)}
+                      >
+                        {g.umo}
+                      </button>
+                    }
+                    icon={<Users className="size-4" />}
+                    actions={<Tag tone={g.allow ? "ok" : "warn"}>{groupReasonLabel(g.reason)}</Tag>}
                   >
-                    查看群详情
-                  </button>
-                </Panel>
-              ))}
+                    <p className="mb-4 text-xs text-muted-foreground">
+                      {activityInfo.label} · 最近活动 {fmtRel(g.last_activity)}
+                    </p>
+                    <p className="mb-4 text-sm">
+                      话题：{g.topic ? <b>{g.topic}</b> : "暂无"}（{topicAge(g.topic_age_min)}）
+                    </p>
+                    <div className="mb-4 grid grid-cols-3 gap-2 text-sm">
+                      <div>
+                        <p className="text-xs text-muted-foreground">成员</p>
+                        <b>{g.member_count}</b>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">本小时额度</p>
+                        <b>{g.hourly_remaining}</b>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">冷却剩余</p>
+                        <b>{g.cooldown_remaining_sec}s</b>
+                      </div>
+                    </div>
+                    <p className="mt-4 text-xs text-muted-foreground">
+                      建议由 core 提供，不代发消息；最后活动时间 {fmtTime(g.last_activity)}
+                    </p>
+                    <button
+                      className="mt-4 text-xs text-primary underline underline-offset-4"
+                      onClick={() => D(g)}
+                    >
+                      查看群详情
+                    </button>
+                  </Panel>
+                );
+              })}
             </div>
           ) : (
             <EmptyState title="没有匹配的群聊" />
@@ -82,12 +122,12 @@ function Groups() {
         }}
       </QueryView>
       <Details
-        title={selected?.group_name ?? "群聊详情"}
+        title={selected?.umo ?? "群聊详情"}
         open={!!selected}
         onClose={() => D(null)}
         subtitle="群聊活动与参与建议 · 不包含私聊字段"
       >
-        {selected && <RawDetails record={selected} />}
+        {selected && <RawDetails record={selected as unknown as Record<string, unknown>} />}
       </Details>
     </>
   );

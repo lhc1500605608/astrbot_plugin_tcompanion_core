@@ -1,3 +1,6 @@
 
 # Reproducible generated WebUI assets; review sources in webui/src.
 webui/dist/** -whitespace linguist-generated=true
+
+# Generated self-contained page preserves literal template string whitespace.
+pages/status/index.html -whitespace linguist-generated=true

@@ -21,6 +21,7 @@ from core.relationship import (
     effective_delta,
     ignored_decay_factor,
     parse_umo,
+    private_fallback_key,
     stage_for,
 )
 
@@ -242,7 +243,7 @@ async def test_contract_relationship_reads_real_state(store):
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="67890",
+            user_id=private_fallback_key(parse_umo("aiocqhttp:FriendMessage:67890")),
             affinity=0.42,
             stage=STAGE_FAMILIAR,
             updated_at=_dt(1).isoformat(),
@@ -258,7 +259,7 @@ async def test_contract_group_does_not_inherit_private_relationship(store):
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="67890",
+            user_id=private_fallback_key(parse_umo("aiocqhttp:FriendMessage:67890")),
             affinity=0.7,
             stage=STAGE_CLOSE,
             updated_at=_dt(1).isoformat(),

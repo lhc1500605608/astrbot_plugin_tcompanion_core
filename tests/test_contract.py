@@ -86,12 +86,12 @@ async def test_get_relationship_minimal_structure(store):
 
 
 async def test_get_relationship_reads_stored_row(store):
-    from core.relationship import RelationshipState
+    from core.relationship import RelationshipState, parse_umo, private_fallback_key
 
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="user-1",
+            user_id=private_fallback_key(parse_umo("aiocqhttp:FriendMessage:user-1")),
             affinity=0.42,
             stage=STAGE_FAMILIAR,
             updated_at="2026-09-21T09:30:00+00:00",

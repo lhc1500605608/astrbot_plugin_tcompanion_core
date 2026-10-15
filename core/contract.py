@@ -95,7 +95,7 @@ from .motivation import (
     thread_id_for,
     time_window,
 )
-from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo
+from .relationship import STAGE_STRANGER, STAGE_UNKNOWN, parse_umo, private_fallback_key
 from .store import Store
 from .weather import WeatherClient
 
@@ -105,7 +105,7 @@ logger = logging.getLogger(__name__)
 CONTRACT_API_VERSION = 1
 
 PLUGIN_NAME = "astrbot_plugin_tcompanion_core"
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.10.1"
 
 #: Persona attributed to an outcome when the caller cannot resolve one.
 DEFAULT_PERSONA_ID = "default"
@@ -294,9 +294,7 @@ class ContractV1:
             if key.is_group:
                 return self._relationship_view(umo, persona_id, STAGE_STRANGER, 0.0, False, True)
             scope, _ = await self._private_scope(key, umo)
-            state = self._store.resolve_relationship_state(scope, persona_id)
-            if state is None:
-                state = self._store.resolve_relationship_state(key.user_id, persona_id)
+            state = self._store.resolve_relationship_state(scope, persona_id) if scope else None
         except Exception:
             state = None
         if state is None:
@@ -368,9 +366,7 @@ class ContractV1:
         resolved_persona = persona_id
         if not is_group and resolved_persona is None:
             try:
-                state = self._store.resolve_relationship_state(user_id)
-                if state is None and person_id:
-                    state = self._store.resolve_relationship_state(key.user_id)
+                state = self._store.resolve_relationship_state(user_id) if user_id else None
                 if state is not None:
                     resolved_persona = state.persona_id
             except Exception:
@@ -644,7 +640,7 @@ class ContractV1:
             }
 
         scope, _ = await self._private_scope(key, umo)
-        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+        resolved = persona_id or self._resolve_persona(scope)
 
         receipt_key = event_id or (
             f"{moment.date().isoformat()}|{int(bool(sent))}|{reason_code}|{int(bool(replied))}"
@@ -727,7 +723,7 @@ class ContractV1:
             return {**base, "reason": "empty_label", "degraded": True}
 
         scope, _ = await self._private_scope(key, umo)
-        resolved = self._resolve_persona(scope, legacy=key.user_id)
+        resolved = self._resolve_persona(scope)
         thread_id = thread_id_for(kind, cleaned, dedupe_key=dedupe_key)
         try:
             row = self._store.upsert_open_thread(
@@ -778,7 +774,7 @@ class ContractV1:
             resolved = persona_id
         else:
             scope, _ = await self._private_scope(key, umo)
-            resolved = self._resolve_persona(scope, legacy=key.user_id)
+            resolved = self._resolve_persona(scope)
         self._advance_open_thread_lifecycle(self._clock(), cfg)
         try:
             rows = self._store.list_open_thread_details(
@@ -894,7 +890,7 @@ class ContractV1:
             return {**base, "reason": "unknown_event_type", "degraded": True}
 
         scope, _ = await self._private_scope(key, umo)
-        resolved = self._resolve_persona(scope, legacy=key.user_id)
+        resolved = self._resolve_persona(scope)
         receipt_key = dedupe_key or f"{moment.date().isoformat()}|{event_type}"
         try:
             result = self._store.apply_emotion_event(
@@ -944,7 +940,7 @@ class ContractV1:
             return self._degraded_emotion_context(moment)
 
         scope, _ = await self._private_scope(key, umo)
-        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+        resolved = persona_id or self._resolve_persona(scope)
         try:
             since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
             rows = self._store.list_emotion_events(
@@ -979,7 +975,7 @@ class ContractV1:
             return self._expression_payload(expression_for(stage=STAGE_STRANGER, is_group=True))
 
         scope, _ = await self._private_scope(key, umo)
-        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+        resolved = persona_id or self._resolve_persona(scope)
         try:
             since = (moment - timedelta(hours=VALENCE_WINDOW_HOURS)).isoformat()
             rows = self._store.list_emotion_events(
@@ -1035,18 +1031,19 @@ class ContractV1:
             return {**base, "reason": "bad_umo", "degraded": True}
         if not key.is_group:
             return {**base, "isolated": True, "reason": "private_isolated"}
+        group_key = self._group_umo_key(key)
+        if not group_key:
+            return {**base, "reason": "bad_identity", "degraded": True}
         cfg = self._group_config()
         if not cfg.enabled:
             return {**base, "isolated": True, "reason": "disabled"}
         try:
             clean_topic = sanitize_thread_title(topic) if topic else ""
-            self._store.bump_group_activity(
-                umo, topic=clean_topic or None, now=moment
-            )
+            self._store.bump_group_activity(group_key, topic=clean_topic or None, now=moment)
             if cfg.member_tracking_enabled and member_id:
                 member_key = member_key_for(key.user_id, member_id)
                 if member_key:
-                    self._store.bump_group_member(umo, member_key, now=moment)
+                    self._store.bump_group_member(group_key, member_key, now=moment)
         except Exception:
             return {**base, "reason": "storage_error", "degraded": True}
         view = self._group_context(umo, moment, member_id=member_id, stamp=False)
@@ -1129,13 +1126,13 @@ class ContractV1:
             if cfg.reset:
                 try:
                     scope, _ = await self._private_scope(key, umo)
-                    resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+                    resolved = persona_id or self._resolve_persona(scope)
                     self._store.clear_growth_state(resolved, scope, now=moment)
                 except Exception:
                     return {**base, "degraded": True}
             return base
         scope, _ = await self._private_scope(key, umo)
-        resolved = persona_id or self._resolve_persona(scope, legacy=key.user_id)
+        resolved = persona_id or self._resolve_persona(scope)
         try:
             view = self._growth_for(scope, resolved, cfg, moment, persist=True)
         except Exception:
@@ -1259,7 +1256,7 @@ class ContractV1:
         if not cfg.enabled:
             return base
         scope, _ = await self._private_scope(key, umo)
-        resolved = self._resolve_persona(scope, legacy=key.user_id)
+        resolved = self._resolve_persona(scope)
         try:
             detail = await self._life_detail(resolved, scope, moment, cfg, day=target_day)
         except Exception:
@@ -1293,7 +1290,7 @@ class ContractV1:
         moment = self._clock()
         target_day = day or moment.date().isoformat()
         scope, _ = await self._private_scope(key, umo)
-        resolved = self._resolve_persona(scope, legacy=key.user_id)
+        resolved = self._resolve_persona(scope)
         try:
             return self._ensure_diary(resolved, scope, target_day, cfg)
         except Exception:
@@ -1581,6 +1578,18 @@ class ContractV1:
         except Exception:
             return GrowthConfig()
 
+    def _group_umo_key(self, key) -> str:
+        """Return the isolated group-storage key for a parsed group UMO.
+
+        Group rows historically used the raw UMO as their primary key, which can
+        make two platform instances with the same native group id share counters
+        and member familiarity when callers abbreviated the UMO to a group key.
+        This helper names the row with the complete UMO; malformed identity
+        fails closed. Migration of existing rows is explicit and never automatic.
+        """
+        raw = str(getattr(key, "raw", "") or "").strip()
+        return raw if getattr(key, "valid", False) else ""
+
     def _group_context(
         self, umo: str, moment: datetime, *, member_id: str | None = None, stamp: bool = False
     ) -> dict | None:
@@ -1594,8 +1603,11 @@ class ContractV1:
         if not cfg.enabled:
             return None
         key = parse_umo(umo)
+        group_key = self._group_umo_key(key)
+        if not group_key:
+            return None
         hour_key = moment.strftime("%Y-%m-%dT%H")
-        row = self._store.get_group_activity(umo) or {}
+        row = self._store.get_group_activity(group_key) or {}
         hour_count = (
             int(row.get("hour_count") or 0) if row.get("hour_key") == hour_key else 0
         )
@@ -1612,7 +1624,7 @@ class ContractV1:
             activity_hour_count=hour_count,
         )
         if stamp and participation["allow"]:
-            self._store.stamp_group_participation(umo, now=moment)
+            self._store.stamp_group_participation(group_key, now=moment)
             participation = {
                 **participation,
                 "hourly_remaining": max(0, cfg.hourly_limit - (part_count + 1)),
@@ -1622,7 +1634,7 @@ class ContractV1:
             if cfg.member_tracking_enabled
             else ""
         )
-        member_row = self._store.get_group_member(umo, member_key) if member_key else None
+        member_row = self._store.get_group_member(group_key, member_key) if member_key else None
         return {
             "api_version": self.api_version,
             "umo": umo,
@@ -1631,7 +1643,7 @@ class ContractV1:
             "isolated": False,
             "group": {
                 "member_count": (
-                    self._store.count_group_members(umo)
+                    self._store.count_group_members(group_key)
                     if cfg.member_tracking_enabled
                     else 0
                 ),
@@ -2027,16 +2039,19 @@ class ContractV1:
     async def _private_scope(self, key, umo: str) -> tuple[str, str]:
         """Resolve ``(scope_key, person_id)`` for a private scope (v1.5).
 
-        The scope key is what the store is keyed by: the authoritative
-        ``person_id`` from the memory bridge when it resolves one, else the
-        ``parse_umo().user_id`` fallback (v1.4.0 behaviour). Fail-closed: any
-        bridge error/absence simply yields the fallback key, and ``person_id``
-        is ``""``. Group scopes must not call this (they keep ``group:<session>``).
+        The scope key is what the store is keyed by. An explicit canonical
+        ``person_id`` from the identity authority wins; semantic state for that
+        Person stays shared across platform instances. Without an authoritative
+        binding, the fallback is the collision-free
+        ``p:<complete UMO>`` key — never a bare native
+        id — so unresolved identities are isolated per platform instance and
+        message type. Fail-closed: bridge error/absence yields that isolated key,
+        and malformed identity yields ``("", "")``.
 
-        v1.8 adds a read-only guard: when the canonical ``person_id`` differs
-        from the legacy fallback and only the fallback holds data, that is a
-        suspected unmigrated key. It is merged only when ``identity.auto_migrate``
-        is on; otherwise it is logged once and left untouched.
+        v1.8's read-only guard remains: when a canonical Person differs from the
+        complete-UMO fallback and only the latter holds data, migration happens
+        only when ``identity.auto_migrate`` is on; otherwise it is logged and the
+        scoped rows are left untouched. Bare legacy IDs are never auto-migrated.
         """
         person_id = ""
         bridge = self._memory_bridge
@@ -2045,12 +2060,20 @@ class ContractV1:
                 person_id = await bridge.resolve_person(umo) or ""
             except Exception:
                 person_id = ""
-        if person_id and person_id != key.user_id:
-            try:
-                self._handle_identity_scope(person_id, key.user_id)
-            except Exception:
-                pass
-        return (person_id or key.user_id), person_id
+        if person_id:
+            if person_id != key.user_id:
+                try:
+                    self._handle_identity_scope(person_id, private_fallback_key(key))
+                except Exception:
+                    pass
+            return person_id, person_id
+
+        # No authoritative Person. Never reuse a bare native id across platforms:
+        # an unresolved private scope gets a platform/message-type/session key.
+        fallback = private_fallback_key(key)
+        if not fallback:
+            return "", ""
+        return fallback, ""
 
     def _detect_unmigrated(self, person_id: str, fallback: str) -> bool:
         """True when ``fallback`` holds a relationship row but ``person_id`` does not.
@@ -2185,13 +2208,13 @@ class ContractV1:
             "results": results,
         }
 
-    def _resolve_persona(self, scope: str, legacy: str = "") -> str:
+    def _resolve_persona(self, scope: str) -> str:
         """Resolve the persona owning ``scope`` (falls back to default).
 
-        ``legacy`` is the pre-v1.5 (``parse_umo``) key, tried second so a row
-        that predates the identity migration is still found.
+        Only the resolved scoped key is read. Legacy bare ids are never probed
+        implicitly; they remain visible until an operator-approved migration.
         """
-        for candidate in (scope, legacy):
+        for candidate in (scope,):
             if not candidate:
                 continue
             try:

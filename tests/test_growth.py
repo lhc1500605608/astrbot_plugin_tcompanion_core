@@ -7,12 +7,17 @@ from datetime import datetime, timezone
 from core.contract import DEFAULT_PERSONA_ID, ContractV1
 from core.emotion import EVENT_GRATITUDE, EXPRESSION_MODES, expression_for
 from core.growth import GROWTH_DRIFT_HARD_CAP, with_growth_drift
-from core.relationship import STAGE_INTIMATE, RelationshipState
+from core.relationship import (
+    STAGE_INTIMATE,
+    RelationshipState,
+    parse_umo,
+    private_fallback_key,
+)
 from core.store import Store
 
 PRIVATE_UMO = "webchat:FriendMessage:webchat!u1!private"
 GROUP_UMO = "aiocqhttp:GroupMessage:10001"
-SCOPE = "webchat!u1!private"
+SCOPE = private_fallback_key(parse_umo(PRIVATE_UMO))
 BASE = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
 
 

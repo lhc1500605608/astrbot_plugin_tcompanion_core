@@ -242,9 +242,30 @@ class UmoKey:
     def isolated(self) -> bool:
         return self.is_group
 
+    @property
+    def valid(self) -> bool:
+        """True only for a complete ``platform:type:session`` identity.
+
+        The session may itself contain colon-delimited thread suffixes. Empty
+        platform/type/session or an unparseable one/two-part string is invalid;
+        callers must fail closed instead of inventing a shared fallback key.
+        """
+        return bool(
+            self.platform
+            and self.session_type
+            and self.session_id
+            and self.raw == f"{self.platform}:{self.session_type}:{self.session_id}"
+        )
+
 
 def parse_umo(umo: str) -> UmoKey:
-    """Parse a UMO string into an isolated per-user relationship key."""
+    """Parse a UMO string into a per-user relationship key.
+
+    The parser deliberately preserves complete colon-delimited thread suffixes
+    (``platform:type:session:thread`` stays in ``session_id``). ``user_id``
+    remains the legacy v1 key and **must not** be used as an unresolved private
+    fallback across platforms; use :func:`private_fallback_key` for that.
+    """
     raw = umo or ""
     parts = raw.split(":")
     platform = parts[0] if parts else ""
@@ -268,6 +289,23 @@ def parse_umo(umo: str) -> UmoKey:
         is_group=is_group,
         user_id=user_id,
     )
+
+
+def private_fallback_key(key: UmoKey) -> str:
+    """Build a collision-free fallback key for an unresolved private UMO.
+
+    Explicit canonical Person bindings win before callers reach this helper.
+    When the identity authority is unavailable or cannot attribute the UMO, the
+    private ledger key is namespaced by **platform, message type and complete
+    session/thread id** (``p:<complete UMO>``). Bare legacy ids are
+    never reused as unresolved fallbacks, so identical native ids on two
+    platforms (or under two message types) cannot read one another's state.
+
+    Fail-closed: malformed/empty identity components yield ``""``.
+    """
+    if not getattr(key, "valid", False) or getattr(key, "is_group", False):
+        return ""
+    return "p:" + key.raw
 
 
 def utcnow() -> datetime:

@@ -17,9 +17,15 @@ from core.motivation import (
     sanitize_thread_title,
     time_window,
 )
-from core.relationship import STAGE_STRANGER, RelationshipState
+from core.relationship import (
+    STAGE_STRANGER,
+    RelationshipState,
+    parse_umo,
+    private_fallback_key,
+)
 
 UMO = "aiocqhttp:FriendMessage:67890"
+SCOPE = private_fallback_key(parse_umo(UMO))
 GROUP_UMO = "aiocqhttp:GroupMessage:67890"
 
 
@@ -162,7 +168,7 @@ async def test_contract_context_full_v1(store):
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="67890",
+            user_id=SCOPE,
             affinity=0.42,
             stage="熟悉",
             updated_at=_moment().isoformat(),
@@ -209,7 +215,7 @@ async def test_contract_context_is_pure_read(store):
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="67890",
+            user_id=SCOPE,
             affinity=0.42,
             stage="熟悉",
             updated_at=_moment().isoformat(),
@@ -228,7 +234,7 @@ async def test_contract_group_isolated_context(store):
     store.save_relationship_state(
         RelationshipState(
             persona_id="p1",
-            user_id="67890",
+            user_id=SCOPE,
             affinity=0.7,
             stage="亲近",
             updated_at=_moment().isoformat(),
@@ -255,7 +261,7 @@ async def test_on_proactive_outcome_idempotent_by_bucket(store):
     assert replay["duplicate"] is True
     assert replay["applied"] is False
 
-    dynamics = store.get_interaction_dynamics("p1", "67890")
+    dynamics = store.get_interaction_dynamics("p1", SCOPE)
     assert dynamics.proactive_sent == 1
     assert dynamics.unanswered_streak == 1
 
@@ -264,7 +270,7 @@ async def test_on_proactive_outcome_idempotent_by_bucket(store):
         UMO, sent=True, reason_code="open_thread", persona_id="p1"
     )
     assert other["applied"] is True
-    assert store.get_interaction_dynamics("p1", "67890").proactive_sent == 2
+    assert store.get_interaction_dynamics("p1", SCOPE).proactive_sent == 2
 
 
 async def test_on_proactive_outcome_explicit_event_id(store):
@@ -281,7 +287,7 @@ async def test_on_proactive_outcome_explicit_event_id(store):
     )
     assert fresh["applied"] is True
     # Unsent outcomes never inflate the sent count.
-    assert store.get_interaction_dynamics("p1", "67890").proactive_sent == 0
+    assert store.get_interaction_dynamics("p1", SCOPE).proactive_sent == 0
 
 
 async def test_on_proactive_outcome_group_is_isolated(store):

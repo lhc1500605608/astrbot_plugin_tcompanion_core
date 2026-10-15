@@ -17,7 +17,12 @@ import pytest
 
 from core.contract import DEFAULT_PERSONA_ID, ContractV1
 from core.emotion import EVENT_GRATITUDE
-from core.relationship import STAGE_INTIMATE, RelationshipState
+from core.relationship import (
+    STAGE_INTIMATE,
+    RelationshipState,
+    parse_umo,
+    private_fallback_key,
+)
 from core.store import Store
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +30,7 @@ PKG = "astrbot_plugin_tcompanion_core"
 
 GROUP_UMO = "aiocqhttp:GroupMessage:10001"
 PRIVATE_UMO = "webchat:FriendMessage:webchat!u1!private"
-SCOPE = "webchat!u1!private"
+SCOPE = private_fallback_key(parse_umo(PRIVATE_UMO))
 BASE = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
 
 GROUP_KEYS = {

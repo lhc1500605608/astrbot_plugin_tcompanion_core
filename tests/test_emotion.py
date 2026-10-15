@@ -32,10 +32,11 @@ from core.emotion import (
     expression_for,
 )
 from core.life_state import LifeState
-from core.relationship import STAGE_INTIMATE, RelationshipState
+from core.relationship import STAGE_INTIMATE, RelationshipState, parse_umo, private_fallback_key
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 UMO = "aiocqhttp:FriendMessage:67890"
+SCOPE = private_fallback_key(parse_umo(UMO))
 GROUP_UMO = "aiocqhttp:GroupMessage:12345"
 
 
@@ -278,7 +279,7 @@ async def test_proactive_receipts_share_one_key(store):
     assert replied["applied"] is True
     assert ignored["duplicate"] is True
     assert ignored["applied"] is False
-    assert store.get_relationship_state("default", "67890").affinity == pytest.approx(0.03)
+    assert store.get_relationship_state("default", SCOPE).affinity == pytest.approx(0.03)
 
 
 async def test_record_emotion_event_storage_error_degrades(store):
@@ -314,8 +315,8 @@ async def test_get_emotion_context_group_is_degraded(store):
 
 async def test_expression_decision_private_avoid(store):
     contract = ContractV1(store, clock=_clock())
-    store.record_proactive_outcome("default", "67890", sent=True, now=NOW)
-    store.record_proactive_outcome("default", "67890", sent=True, now=NOW)
+    store.record_proactive_outcome("default", SCOPE, sent=True, now=NOW)
+    store.record_proactive_outcome("default", SCOPE, sent=True, now=NOW)
     decision = await contract.expression_decision(UMO)
     assert decision["api_version"] == 1
     assert decision["mode"] == "回避"
@@ -381,7 +382,7 @@ async def test_proactive_context_group_has_no_private_emotion(store):
 async def test_negative_emotion_only_dampens_motivation(store):
     store.save_relationship_state(
         RelationshipState(
-            persona_id="p1", user_id="67890", affinity=0.0, updated_at=NOW.isoformat()
+            persona_id="p1", user_id=SCOPE, affinity=0.0, updated_at=NOW.isoformat()
         )
     )
     contract = ContractV1(store, clock=_clock())
@@ -399,7 +400,7 @@ async def test_negative_emotion_only_dampens_motivation(store):
     umo2 = "aiocqhttp:FriendMessage:22222"
     store.save_relationship_state(
         RelationshipState(
-            persona_id="p2", user_id="22222", affinity=0.0, updated_at=NOW.isoformat()
+            persona_id="p2", user_id=private_fallback_key(parse_umo(umo2)), affinity=0.0, updated_at=NOW.isoformat()
         )
     )
     neutral2 = await contract.get_proactive_context(umo2, persona_id="p2")
@@ -461,7 +462,7 @@ def test_emotion_events_store_no_message_body(store):
 async def test_life_state_energy_feeds_expression(store):
     store.save_relationship_state(
         RelationshipState(
-            persona_id="p1", user_id="67890", affinity=0.0, updated_at=NOW.isoformat()
+            persona_id="p1", user_id=SCOPE, affinity=0.0, updated_at=NOW.isoformat()
         )
     )
     store.upsert_life_state(

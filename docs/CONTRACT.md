@@ -1123,11 +1123,53 @@ companion-core 解析私聊 Person 的优先级：
   只回计划。
 - 面板路由：`POST /person/rekey`（body `{dry_run?}`，默认 `true`）；回滚复用
   `POST /person/migrate/rollback`。
-- 既有 `identity.auto_migrate` 的在线 canonical 探测（§未变）保留：命中孤儿键时
-  自动 rekey，默认仍为**只提示不合并**。
+- `identity.auto_migrate` 仅探测当前权威绑定对应的完整 UMO 回退键，默认只提示；
+  裸 native-id 历史键不参与在线自动迁移。
 
 ### 21.5 降级（硬性）
 
 - 无映射 / 无重复键时，`get_relationship` / `get_proactive_context` 等契约输出与
   v1.9.0 **逐字节一致**（`identity_map` 缺失即 §20.3 的空索引）。
 - 镜像读失败同样 fail-closed 到空索引；任何映射异常不得进入读路径。
+
+## 22. 未解析身份回退隔离（v1.11）
+
+### 22.1 解析与回退
+
+- 显式 canonical Person 仍优先：`MemoryBridge.resolve_person`（在线→共享 index→镜像）
+  命中时，关系、情绪、生活线、成长、主动收据等私有语义状态继续按 `person_id`
+  共享；同一 Person 的跨平台绑定不因本节变化。
+- **未解析私聊**（无桥、桥禁用、插件缺失、超时、异常、空结果、离线映射缺失/损坏）
+  一律改用碰撞自由回退键：
+  `p:<platform>:<message_type>:<complete_session_or_thread_id>`。
+  不再隐式使用裸 `parse_umo().user_id`，因此两个平台实例同 native id、或同一平台
+  不同消息类型，互不读写。
+- 冒号线程后缀保持完整：`platform:type:session:thread` 的 session 部分原样进入回退键。
+- 未知/畸形 UMO（缺 platform/type/session、两段式、空值）**fail closed**，不生成任何
+  共享键。
+
+### 22.2 遗留数据
+
+- 既有裸 native-id 行保留，不自动改键、不删除、不隐式暴露到新回退键。
+- `identity.auto_migrate=false`（默认）仅提示；`true` 时仅处理在线 canonical
+  明确绑定的完整 UMO 回退键，且 canonical 已有数据则不动。**不会自动合并不同平台的歧义
+  裸 id。**
+- 迁移必须显式、可审计、可回滚（`plan_person_rekey` / `rekey_person_keys` /
+  rollback），且只有归属唯一验证通过时才应执行。多平台重复 bare id 需人工确认
+  attribution 后逐别名迁移。
+- `_resolve_persona` 与读路径不再隐式尝试裸 legacy 键，避免绕过隔离。
+
+### 22.3 群聊
+
+- 群聊持久化 API（activity/participation/member familiarity）统一以完整合法 UMO
+  作为存储键；同 native group id 的不同平台实例互不污染。
+- 成员键仍为 `group:<complete_group_session>#<member_id>`，不与私聊 person 相交。
+- 群存储不读任何私有 Person 状态。旧群行保留；如需迁移到完整 UMO 键，必须显式
+  人工/工具操作，本版本不做自动迁移。
+
+### 22.4 兼容性
+
+- `api_version=1` 不变，无公开方法签名变化，schema 版本不变，不新增表/列。
+- 新回退键只影响未解析身份的新写入/读取；显式 canonical Person 与 v1.10 行为一致。
+
+身份隔离修订：未绑定身份的键为 `p:` 加原始完整 UMO，保留空格及线程后缀，不拼接未转义分隔符。`identity.auto_migrate` 仅可迁移当前权威绑定对应的完整 UMO 范围数据；裸原生 ID 的历史行无法证明平台归属，始终保留并要求显式人工映射。

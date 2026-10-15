@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.10.1 — 2026-10-15
+
+- 未绑定私聊按原始完整 UMO 隔离，保留平台实例、消息类型和线程后缀；已确认 canonical Person 继续共享状态。
+- 裸原生 ID 历史数据不隐式读取或在线自动迁移；auto_migrate 仅处理权威绑定对应的完整 UMO 回退键，保留显式人工迁移和回滚。
+- 补充身份降级、非法 UMO、旧数据和群聊隔离回归；契约版本仍为 v1。
+- 协作版本：WarmWhisper v2.13.3，tmemory v0.17.0（未修改），后续逐步规范版本序列。
+- 验证：358 项 Python 测试及 5 项跨仓集成测试通过；生产数据库完整性与发送 attempt 回执匹配正常。
+
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]

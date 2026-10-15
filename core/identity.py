@@ -5,7 +5,8 @@ Pure, side-effect-free helpers plus the ``identity`` config parser. Identity is
 ``identity_map.json`` (see :mod:`core.identity_map`), never from string
 heuristics. What lives here is therefore only:
 
-* :func:`is_group_key`, the group-scope guard used by the panel/store; and
+* :func:`is_group_key`, the group-scope guard used by the panel/store;
+* :func:`private_fallback_key`, the collision-free unresolved-private key; and
 * :class:`IdentityConfig`, which gates the opt-in automatic rekey performed in
   ``ContractV1._private_scope``.
 

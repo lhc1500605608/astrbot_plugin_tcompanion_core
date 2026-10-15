@@ -19,7 +19,13 @@ import pytest
 from core.contract import DEFAULT_PERSONA_ID, ContractV1
 from core.emotion import EVENT_GRATITUDE, EVENT_MISUNDERSTOOD
 from core.memory_bridge import MemoryBridge
-from core.relationship import STAGE_FAMILIAR, STAGE_STRANGER, RelationshipState
+from core.relationship import (
+    STAGE_FAMILIAR,
+    STAGE_STRANGER,
+    RelationshipState,
+    parse_umo,
+    private_fallback_key,
+)
 
 UMO_A = "aiocqhttp:FriendMessage:42"
 UMO_B = "telegram:FriendMessage:7"
@@ -231,14 +237,17 @@ async def test_proactive_context_omits_person_id_without_bridge(store):
     assert "person_id" not in ctx
 
 
-async def test_fail_closed_falls_back_to_parse_umo(store):
-    # Bridge present but cannot resolve a Person -> parse_umo().user_id key.
+async def test_fail_closed_uses_platform_instance_fallback(store):
+    # Bridge present but cannot resolve a Person -> isolated fallback key,
+    # never the bare native id shared across platforms.
     contract = ContractV1(store, clock=lambda: NOW, memory_bridge=_identity_star({}))
     await contract.record_emotion_event(
         UMO_A, event_type=EVENT_MISUNDERSTOOD, dedupe_key="msg:neg"
     )
+    fallback = private_fallback_key(parse_umo(UMO_A))
     assert store.resolve_relationship_state("42") is None  # negative floor, no row
-    assert store.list_emotion_events(DEFAULT_PERSONA_ID, "42", limit=10)
+    assert store.list_emotion_events(DEFAULT_PERSONA_ID, fallback, limit=10)
+    assert not store.list_emotion_events(DEFAULT_PERSONA_ID, "42", limit=10)
     assert not store.list_emotion_events(DEFAULT_PERSONA_ID, "aiocqhttp:42", limit=10)
 
 

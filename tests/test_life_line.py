@@ -14,9 +14,11 @@ from core.life_line import (
 )
 from core.life_state import LifeState
 from core.motivation import build_quota, fuse_motivation
+from core.relationship import parse_umo, private_fallback_key
 from core.weather import WeatherClient, weather_text
 
 UMO = "aiocqhttp:FriendMessage:67890"
+SCOPE = private_fallback_key(parse_umo(UMO))
 GROUP_UMO = "aiocqhttp:GroupMessage:67890"
 
 
@@ -247,7 +249,7 @@ async def test_quiet_hours_opt_in_exempts(store):
 
 async def test_quiet_hours_recent_interaction_exempts(store):
     night = datetime(2026, 9, 21, 23, 30, tzinfo=timezone.utc)
-    store.record_user_message("default", "67890", now=night - timedelta(minutes=3))
+    store.record_user_message("default", SCOPE, now=night - timedelta(minutes=3))
     contract = ContractV1(store, clock=_clock(night))
     ctx = await contract.get_proactive_context(UMO)
     assert ctx["life_detail"]["quiet"] is False
@@ -273,18 +275,18 @@ async def test_meal_event_recorded_in_window(store):
     line = await contract.get_life_line(UMO)
     assert line["meal"]["slot"] == "breakfast"
     assert line["meal"]["in_window"] is True
-    rows = store.list_life_events("default", "67890", day="2026-09-21", kind="meal")
+    rows = store.list_life_events("default", SCOPE, day="2026-09-21", kind="meal")
     assert [row["dedupe_key"] for row in rows] == ["meal:breakfast:2026-09-21"]
 
 
 async def test_diary_synthesized_without_llm(store):
     now = datetime(2026, 9, 21, 9, 30, tzinfo=timezone.utc)
     store.upsert_sleep_window(
-        "default", "67890", "2026-09-20", start_min=1380, end_min=450, source="default"
+        "default", SCOPE, "2026-09-20", start_min=1380, end_min=450, source="default"
     )
     store.insert_life_event(
         "default",
-        "67890",
+        SCOPE,
         kind="meal",
         dedupe_key="meal:lunch:2026-09-20",
         ts=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),

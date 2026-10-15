@@ -34,6 +34,7 @@ NOW = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)
 FALLBACK = "1500605608"
 PERSON = "千草酱:1500605608"
 UMO = f"aiocqhttp:FriendMessage:{FALLBACK}"
+SCOPED_FALLBACK = "p:" + UMO
 GROUP_UMO = "aiocqhttp:GroupMessage:1000"
 
 INDEX = {"aiocqhttp:1500605608": PERSON}
@@ -212,7 +213,7 @@ def test_rekey_is_dry_then_executes_idempotent_and_rolls_back(
 
 # -- unmigrated-key guard (unchanged) --------------------------------------
 async def test_probe_default_reports_without_touching_data(store, caplog):
-    store.save_relationship_state(_rel(FALLBACK, 0.4))
+    store.save_relationship_state(_rel(SCOPED_FALLBACK, 0.4))
     contract = ContractV1(store, clock=lambda: NOW, memory_bridge=_bridge({UMO: PERSON}))
 
     with caplog.at_level(logging.WARNING):
@@ -220,14 +221,14 @@ async def test_probe_default_reports_without_touching_data(store, caplog):
         await contract.get_relationship(UMO)  # cached: no second warning
 
     assert store.get_relationship_state(DEFAULT_PERSONA_ID, PERSON) is None
-    assert store.get_relationship_state(DEFAULT_PERSONA_ID, FALLBACK) is not None
+    assert store.get_relationship_state(DEFAULT_PERSONA_ID, SCOPED_FALLBACK) is not None
     warnings = [r for r in caplog.records if "legacy key" in r.getMessage()]
     assert len(warnings) == 1
 
 
 async def test_probe_skips_when_canonical_has_data(store):
     store.save_relationship_state(_rel(PERSON, 0.2))
-    store.save_relationship_state(_rel(FALLBACK, 0.4))
+    store.save_relationship_state(_rel(SCOPED_FALLBACK, 0.4))
     contract = ContractV1(
         store,
         config={"identity": {"auto_migrate": True}},
@@ -239,13 +240,13 @@ async def test_probe_skips_when_canonical_has_data(store):
 
     # Both keys kept: the guard never merges when the canonical already has data.
     assert store.get_relationship_state(DEFAULT_PERSONA_ID, PERSON) is not None
-    assert store.get_relationship_state(DEFAULT_PERSONA_ID, FALLBACK) is not None
+    assert store.get_relationship_state(DEFAULT_PERSONA_ID, SCOPED_FALLBACK) is not None
 
 
 async def test_auto_migrate_merges_idempotent_and_rolls_back(store, tmp_path, monkeypatch):
     monkeypatch.setenv("TCOMPANION_DATA_DIR", str(tmp_path))
-    store.save_relationship_state(_rel(FALLBACK, 0.4))
-    store.record_user_message(DEFAULT_PERSONA_ID, FALLBACK, now=NOW, count=3)
+    store.save_relationship_state(_rel(SCOPED_FALLBACK, 0.4))
+    store.record_user_message(DEFAULT_PERSONA_ID, SCOPED_FALLBACK, now=NOW, count=3)
     contract = ContractV1(
         store,
         config={"identity": {"auto_migrate": True}},
@@ -257,13 +258,13 @@ async def test_auto_migrate_merges_idempotent_and_rolls_back(store, tmp_path, mo
     await contract.get_relationship(UMO)  # idempotent re-run
 
     assert store.get_relationship_state(DEFAULT_PERSONA_ID, PERSON) is not None
-    assert store.get_relationship_state(DEFAULT_PERSONA_ID, FALLBACK) is None
+    assert store.get_relationship_state(DEFAULT_PERSONA_ID, SCOPED_FALLBACK) is None
     backups = list((tmp_path / "person_migrations").glob("person_migrate_*.json"))
     assert backups
 
     rollback = store.rollback_person_migration()
     assert rollback["ok"] is True
-    assert store.get_relationship_state(DEFAULT_PERSONA_ID, FALLBACK) is not None
+    assert store.get_relationship_state(DEFAULT_PERSONA_ID, SCOPED_FALLBACK) is not None
 
 
 async def test_probe_fail_closed_on_store_error(store, monkeypatch):
